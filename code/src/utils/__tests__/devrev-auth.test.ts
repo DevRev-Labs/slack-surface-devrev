@@ -1,0 +1,267 @@
+import axios from 'axios';
+import { 
+  findUserByEmail, 
+  createActAsToken, 
+  getOrCreateActAsToken, 
+  getEventSourceTriggerUrl,
+  createWebhook,
+  getOrCreateWebhookForEventSource,
+  _clearActAsTokenCache,
+  _clearWebhookCache
+} from '../devrev-auth';
+
+jest.mock('axios');
+const mockedAxios = axios as jest.Mocked<typeof axios>;
+
+describe('devrev-auth', () => {
+  const endpoint = 'https://api.devrev.ai';
+  const token = 'service-token';
+  const email = 'test@example.com';
+  const userId = 'user-123';
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    _clearActAsTokenCache();
+    _clearWebhookCache();
+  });
+
+  describe('findUserByEmail', () => {
+    it('should return user ID when user is found', async () => {
+      mockedAxios.get.mockResolvedValueOnce({
+        data: {
+          dev_users: [{ id: userId }]
+        }
+      });
+
+      const result = await findUserByEmail(email, endpoint, token);
+      expect(result).toBe(userId);
+      expect(mockedAxios.get).toHaveBeenCalledWith(`${endpoint}/dev-users.list`, {
+        params: { email },
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+    });
+
+    it('should return null when user is not found', async () => {
+      mockedAxios.get.mockResolvedValueOnce({
+        data: { dev_users: [] }
+      });
+
+      const result = await findUserByEmail(email, endpoint, token);
+      expect(result).toBeNull();
+    });
+
+    it('should return null and log error on failure', async () => {
+      const consoleSpy = jest.spyOn(console, 'error').mockImplementation();
+      mockedAxios.get.mockRejectedValueOnce(new Error('API Error'));
+
+      const result = await findUserByEmail(email, endpoint, token);
+      expect(result).toBeNull();
+      expect(consoleSpy).toHaveBeenCalled();
+      consoleSpy.mockRestore();
+    });
+  });
+
+  describe('createActAsToken', () => {
+    it('should return access token on success', async () => {
+      const actAsToken = 'new-access-token';
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { access_token: actAsToken }
+      });
+
+      const result = await createActAsToken(userId, endpoint, token);
+      expect(result).toBe(actAsToken);
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        `${endpoint}/auth-tokens.create`,
+        expect.objectContaining({
+          act_as: userId,
+          subject_token: token
+        }),
+        expect.any(Object)
+      );
+    });
+
+    it('should return null and log error on failure', async () => {
+      const consoleSpy = jest.spyOn(console, 'error').mockImplementation();
+      mockedAxios.post.mockRejectedValueOnce(new Error('Auth Error'));
+
+      const result = await createActAsToken(userId, endpoint, token);
+      expect(result).toBeNull();
+      expect(consoleSpy).toHaveBeenCalled();
+      consoleSpy.mockRestore();
+    });
+  });
+
+  describe('getOrCreateActAsToken', () => {
+    it('should create and cache a new token', async () => {
+      const actAsToken = 'fresh-token';
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { access_token: actAsToken }
+      });
+
+      const result = await getOrCreateActAsToken(userId, endpoint, token);
+      expect(result).toBe(actAsToken);
+      expect(mockedAxios.post).toHaveBeenCalledTimes(1);
+    });
+
+    it('should return cached token if not expired', async () => {
+      const actAsToken = 'cached-token';
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { access_token: actAsToken }
+      });
+
+      // First call to populate cache
+      await getOrCreateActAsToken(userId, endpoint, token);
+      
+      // Second call should use cache
+      const result = await getOrCreateActAsToken(userId, endpoint, token);
+      expect(result).toBe(actAsToken);
+      expect(mockedAxios.post).toHaveBeenCalledTimes(1);
+    });
+
+    it('should create new token if cached one is expired', async () => {
+      const oldToken = 'old-token';
+      const newToken = 'new-token';
+      
+      mockedAxios.post
+        .mockResolvedValueOnce({ data: { access_token: oldToken } })
+        .mockResolvedValueOnce({ data: { access_token: newToken } });
+
+      // Mock Date.now to control expiration
+      const realDateNow = Date.now;
+      let mockTime = 1000000;
+      global.Date.now = jest.fn(() => mockTime);
+
+      await getOrCreateActAsToken(userId, endpoint, token, 10); // 10 min TTL
+      
+      // Advance time beyond TTL (10 min = 600,000 ms)
+      mockTime += 11 * 60 * 1000;
+      
+      const result = await getOrCreateActAsToken(userId, endpoint, token);
+      expect(result).toBe(newToken);
+      expect(mockedAxios.post).toHaveBeenCalledTimes(2);
+
+      global.Date.now = realDateNow;
+    });
+  });
+
+  describe('getEventSourceTriggerUrl', () => {
+    const eventSourceId = 'don:integration:dvrv-us-1:devo/123:event_source/abc';
+
+    it('should construct trigger URL from event source ID', () => {
+      const result = getEventSourceTriggerUrl(eventSourceId, endpoint);
+      expect(result).toBe(`${endpoint}/internal/event-sources.invoke?id=${encodeURIComponent(eventSourceId)}`);
+    });
+
+    it('should properly encode event source ID in URL', () => {
+      const idWithSpecialChars = 'event:source/with+special&chars';
+      const result = getEventSourceTriggerUrl(idWithSpecialChars, endpoint);
+      expect(result).toBe(`${endpoint}/internal/event-sources.invoke?id=${encodeURIComponent(idWithSpecialChars)}`);
+    });
+  });
+
+  describe('createWebhook', () => {
+    const webhookUrl = 'https://trigger.devrev.ai/webhook/abc';
+    const webhookId = 'don:integration:...:webhook/xyz';
+
+    it('should return webhook ID when created with active status', async () => {
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { webhook: { id: webhookId, status: 'active' } }
+      });
+
+      const result = await createWebhook(webhookUrl, endpoint, token);
+      expect(result).toBe(webhookId);
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        `${endpoint}/webhooks.create`,
+        expect.objectContaining({ url: webhookUrl, event_types: ['ai_agent_response'] }),
+        expect.any(Object)
+      );
+    });
+
+    it('should poll for active status when not immediately active', async () => {
+      const logSpy = jest.spyOn(console, 'log').mockImplementation();
+      
+      // Mock webhook creation with pending status
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { webhook: { id: webhookId, status: 'pending' } }
+      });
+      // Mock polling for status
+      mockedAxios.get.mockResolvedValueOnce({
+        data: { webhook: { status: 'active' } }
+      });
+
+      const result = await createWebhook(webhookUrl, endpoint, token);
+      expect(result).toBe(webhookId);
+      expect(mockedAxios.get).toHaveBeenCalled();
+      logSpy.mockRestore();
+    });
+
+    it('should return null when webhook creation fails', async () => {
+      const consoleSpy = jest.spyOn(console, 'error').mockImplementation();
+      mockedAxios.post.mockRejectedValueOnce(new Error('Create failed'));
+
+      const result = await createWebhook(webhookUrl, endpoint, token);
+      expect(result).toBeNull();
+      expect(consoleSpy).toHaveBeenCalled();
+      consoleSpy.mockRestore();
+    });
+
+    it('should return null when webhook ID is missing in response', async () => {
+      const consoleSpy = jest.spyOn(console, 'error').mockImplementation();
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { webhook: {} }
+      });
+
+      const result = await createWebhook(webhookUrl, endpoint, token);
+      expect(result).toBeNull();
+      consoleSpy.mockRestore();
+    });
+  });
+
+  describe('getOrCreateWebhookForEventSource', () => {
+    const eventSourceId = 'don:integration:...:event_source/456';
+    const webhookId = 'don:integration:...:webhook/created';
+
+    it('should create and cache a webhook for event source', async () => {
+      // Mock webhook creation with active status
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { webhook: { id: webhookId, status: 'active' } }
+      });
+
+      const result = await getOrCreateWebhookForEventSource(eventSourceId, endpoint, token);
+      expect(result).toBe(webhookId);
+      expect(mockedAxios.post).toHaveBeenCalledTimes(1);
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        `${endpoint}/webhooks.create`,
+        expect.objectContaining({
+          url: expect.stringContaining(`/internal/event-sources.invoke?id=`)
+        }),
+        expect.any(Object)
+      );
+    });
+
+    it('should return cached webhook ID on subsequent calls', async () => {
+      // Mock webhook creation with active status
+      mockedAxios.post.mockResolvedValueOnce({
+        data: { webhook: { id: webhookId, status: 'active' } }
+      });
+
+      await getOrCreateWebhookForEventSource(eventSourceId, endpoint, token);
+      const result = await getOrCreateWebhookForEventSource(eventSourceId, endpoint, token);
+      
+      expect(result).toBe(webhookId);
+      expect(mockedAxios.post).toHaveBeenCalledTimes(1); // Only once due to cache
+    });
+
+    it('should return null when webhook creation fails', async () => {
+      _clearWebhookCache();
+      const consoleSpy = jest.spyOn(console, 'error').mockImplementation();
+      
+      mockedAxios.post.mockRejectedValueOnce(new Error('Webhook creation failed'));
+
+      const result = await getOrCreateWebhookForEventSource('new-event-source', endpoint, token);
+      expect(result).toBeNull();
+      expect(consoleSpy).toHaveBeenCalled();
+      consoleSpy.mockRestore();
+    });
+  });
+});
