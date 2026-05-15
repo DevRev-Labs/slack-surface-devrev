@@ -4,6 +4,11 @@ description: "DevRev snap-in that integrates Slack with DevRev AI Agents. Receiv
 
 service_account:
   display_name: Slack AI Integration Bot
+  scopes:
+    self:
+      - scope: dev_user:read
+        optional: false
+        reason: "Read DevRev user details for email-based user mapping"
 
 inputs:
   organization:
