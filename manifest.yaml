@@ -15,8 +15,6 @@ service_account:
       - scope: ai_agent:execute
         optional: true
         reason: "Execute AI Agent for processing Slack messages"
-    impersonate:
-      - scope: dev_user:all_devusers
 
 inputs:
   organization:
