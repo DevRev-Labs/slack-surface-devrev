@@ -9,6 +9,14 @@ service_account:
       - scope: dev_user:read
         optional: false
         reason: "Read DevRev user details for email-based user mapping"
+      - scope: ai_agent:read
+        optional: true
+        reason: "Read AI Agent details to invoke agents"
+      - scope: ai_agent:execute
+        optional: true
+        reason: "Execute AI Agent for processing Slack messages"
+    impersonate:
+      - scope: dev_user:all_devusers
 
 inputs:
   organization:

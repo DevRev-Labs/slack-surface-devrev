@@ -1,10 +1,11 @@
 /**
  * DevRev Authentication Utilities
- * 
+ *
  * Handles user lookup, token impersonation (act-as), and webhook management.
  */
 
 import axios from 'axios';
+import { client, publicSDK } from '@devrev/typescript-sdk';
 
 /**
  * Token Cache interface for act-as tokens.
@@ -58,11 +59,8 @@ export function invalidateWebhookCache(eventSourceId: string): void {
  */
 export async function findUserByEmail(email: string, endpoint: string, token: string): Promise<string | null> {
   try {
-    const response = await axios.get(`${endpoint}/dev-users.list`, {
-      params: { email },
-      headers: { 'Authorization': `Bearer ${token}` }
-    });
-
+    const sdk = client.setup({ endpoint, token });
+    const response = await sdk.devUsersList({ email: [email] });
     const user = response.data.dev_users?.[0];
     return user ? user.id : null;
   } catch (error: any) {
@@ -80,22 +78,22 @@ export async function findUserByEmail(email: string, endpoint: string, token: st
  * @returns The new access token.
  */
 export async function createActAsToken(userId: string, endpoint: string, serviceToken: string): Promise<string | null> {
+  console.log(`[DevRev Auth] Creating act-as token for userId: ${userId}`);
   try {
-    const response = await axios.post(`${endpoint}/auth-tokens.create`, {
-      requested_token_type: 'urn:devrev:params:oauth:token-type:aat:act-as',
-      subject_token_type: 'urn:devrev:params:oauth:token-type:session',
-      subject_token: serviceToken,
+    const sdk = client.setup({ endpoint, token: serviceToken });
+    const response = await sdk.authTokensCreate({
       act_as: userId,
-    }, {
-      headers: {
-        'Authorization': `Bearer ${serviceToken}`,
-        'Content-Type': 'application/json'
-      }
+      expires_in: 360,
+      grant_type: publicSDK.AuthTokenGrantType.UrnDevrevParamsOauthGrantTypeTokenIssue,
+      requested_token_type: publicSDK.AuthTokenRequestedTokenType.UrnDevrevParamsOauthTokenTypePatActAs,
     });
-
+    console.log(`[DevRev Auth] act-as token created successfully`);
     return response.data.access_token;
   } catch (error: any) {
-    console.error('Error creating act-as token:', error.response?.data || error.message);
+    console.error('[DevRev Auth] act-as token creation failed:');
+    console.error('  status:', error.response?.status);
+    console.error('  data:', JSON.stringify(error.response?.data, null, 2));
+    console.error('  message:', error.message);
     return null;
   }
 }

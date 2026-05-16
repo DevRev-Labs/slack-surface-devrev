@@ -4,7 +4,7 @@
  * Handles incoming messages from Slack and forwards them to DevRev AI Agents.
  */
 
-import axios from 'axios';
+import { betaSDK, client } from '@devrev/typescript-sdk';
 import { FunctionInput } from '../../types';
 import {
   extractConversationReference,
@@ -76,49 +76,61 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
   // Store initial conversation reference
   storeConversationReference(sessionId, conversationRef);
 
-  // Get user token (try email-based auth, fall back to service account)
+  // Verify user is in DevRev org and get act-as token for user-scoped AI execution
   let userToken = config.serviceAccountToken;
 
   try {
+    console.log(`[${requestId}] [AUTH] Looking up email for Slack user: ${slackEvent.user}`);
     const userEmail = await getUserEmail(slackEvent.user, config.slackBotToken);
-    
+
     if (userEmail) {
-      console.log(`[${requestId}] Found user email: ${userEmail}`);
-      
-      const devrevUserId = await findUserByEmail(userEmail, config.devrevEndpoint, config.serviceAccountToken);
-      
-      if (devrevUserId) {
-        const actAsToken = await getOrCreateActAsToken(devrevUserId, config.devrevEndpoint, config.serviceAccountToken);
-        if (actAsToken) {
-          userToken = actAsToken;
-          console.log(`[${requestId}] Using act-as token for user`);
-        }
+      console.log(`[${requestId}] [AUTH] Found user email: ${userEmail}`);
+      const devrevUserId = await findUserByEmail(userEmail, config.devrevEndpointInternal, config.serviceAccountToken);
+
+      if (!devrevUserId) {
+        console.warn(`[${requestId}] [AUTH] User ${userEmail} is not in DevRev org — rejecting`);
+        await sendMessage(
+          conversationRef.channel,
+          `Sorry, your account (${userEmail}) is not part of the DevRev organization. Please contact your admin to get access.`,
+          config.slackBotToken,
+          slackEvent.thread_ts || undefined
+        ).catch(() => {});
+        return { status: 'ignored', reason: 'User not in DevRev org' };
+      }
+
+      console.log(`[${requestId}] [AUTH] User verified in org: ${devrevUserId}, trying act-as token`);
+      const actAsToken = await getOrCreateActAsToken(devrevUserId, config.devrevEndpointInternal, config.serviceAccountToken);
+      if (actAsToken) {
+        userToken = actAsToken;
+        console.log(`[${requestId}] [AUTH] Using act-as token for user-scoped AI execution`);
       } else {
-        console.warn(`[${requestId}] No DevRev user found for email: ${userEmail}`);
+        console.warn(`[${requestId}] [AUTH] act-as failed, falling back to service account token`);
       }
     } else {
-      console.warn(`[${requestId}] Could not get user email from Slack`);
+      console.warn(`[${requestId}] [AUTH] Could not get user email from Slack for user: ${slackEvent.user}`);
     }
   } catch (authError: any) {
-    console.warn(`[${requestId}] Failed to perform email-based auth, falling back to service account:`, authError.message);
+    console.warn(`[${requestId}] [AUTH] Auth lookup failed:`, authError.message);
   }
 
   try {
-    // Send initial "Searching..." message
+    console.log(`[${requestId}] [SLACK] Sending initial 'Searching...' message to channel: ${conversationRef.channel}, thread: ${threadTs}`);
     const tempMessageTs = await sendMessage(
       conversationRef.channel,
       '⏳ Searching...',
       config.slackBotToken,
       threadTs
     );
+    console.log(`[${requestId}] [SLACK] Temp message sent, ts: ${tempMessageTs}`);
 
-    // Update conversation reference with temp message ts
     conversationRef.tempMessageTs = tempMessageTs;
     conversationRef.threadTs = threadTs;
     storeConversationReference(sessionId, conversationRef);
+    console.log(`[${requestId}] [STORE] Conversation reference stored for session: ${sessionId}`);
 
-    // Call AI Agent asynchronously
+    console.log(`[${requestId}] [AI] Calling AI Agent async, agentId: ${config.aiAgentId}, sessionId: ${sessionId}`);
     await callAIAgentAsync(cleanedMessage, sessionId, conversationRef, config, userToken);
+    console.log(`[${requestId}] [AI] Async AI Agent call submitted successfully`);
 
     return {
       status: 'success',
@@ -127,52 +139,22 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
       message: 'Request submitted, responses will be sent via ai_agent_response events',
     };
   } catch (error: any) {
-    console.error(`[${requestId}] Async API error:`, error.message);
-    
-    // Try sync fallback
-    try {
-      const agentResponse = await callAIAgentSync(cleanedMessage, sessionId, config, userToken);
+    console.error(`[${requestId}] [AI] Async API error: ${error.message}`);
 
-      if (agentResponse && config.slackBotToken) {
-        // If we have a temp message, update it; otherwise send new message
-        if (conversationRef.tempMessageTs) {
-          const { updateMessage } = await import('../../utils/slack-client');
-          await updateMessage(
-            conversationRef.channel,
-            conversationRef.tempMessageTs,
-            agentResponse,
-            config.slackBotToken
-          );
-        } else {
-          await sendMessage(conversationRef.channel, agentResponse, config.slackBotToken, threadTs);
-        }
-      }
-
-      return {
-        status: 'success',
-        mode: 'sync_fallback',
-        session_id: sessionId,
-        response_preview: agentResponse?.substring(0, 100),
-      };
-    } catch (syncError: any) {
-      console.error(`[${requestId}] Sync fallback error:`, syncError.message);
-      
-      // Send error message to Slack
-      if (config.slackBotToken) {
-        await sendMessage(
-          conversationRef.channel,
-          'Sorry, I encountered an error processing your request. Please try again.',
-          config.slackBotToken,
-          threadTs
-        ).catch(() => {});
-      }
-      
-      return {
-        status: 'error',
-        reason: 'Failed to get AI Agent response',
-        details: syncError.message,
-      };
+    if (config.slackBotToken) {
+      await sendMessage(
+        conversationRef.channel,
+        'Sorry, I encountered an error processing your request. Please try again.',
+        config.slackBotToken,
+        threadTs
+      ).catch(() => {});
     }
+
+    return {
+      status: 'error',
+      reason: 'Failed to get AI Agent response',
+      details: error.message,
+    };
   }
 }
 
@@ -187,42 +169,15 @@ function extractConfig(event: FunctionInput): any {
     aiAgentId: input_data.global_values.ai_agent_id,
     slackBotToken: input_data.keyrings['slack_bot_token'],
     slackSigningSecret: input_data.keyrings['slack_signing_secret'],
-    devrevEndpoint: execution_metadata.devrev_endpoint.replace(/\/$/, ''),
+    devrevEndpoint: execution_metadata.devrev_endpoint.replace(/\/$/, '').replace(/\/internal$/, ''),
+    devrevEndpointInternal: execution_metadata.devrev_endpoint.replace(/\/$/, ''),
     serviceAccountToken: context.secrets.service_account_token,
     aiAgentEventsSourceId: input_data.event_sources?.['ai-agent-events'],
   };
 }
 
 /**
- * Call the AI Agent API synchronously.
- */
-async function callAIAgentSync(message: string, sessionId: string, config: any, token: string): Promise<string> {
-  const apiUrl = `${config.devrevEndpoint}/internal/ai-agents.events.execute-sync`;
-  
-  const payload = {
-    agent: config.aiAgentId,
-    session_object: sessionId,
-    event: { input_message: { message } },
-  };
-
-  try {
-    const response = await axios.post(apiUrl, payload, {
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      timeout: 60000,
-    });
-    return parseAgentResponse(response.data);
-  } catch (error: any) {
-    console.error(`[AI Agent Error Sync] Status: ${error.response?.status}`);
-    console.error(`[AI Agent Error Response] ${JSON.stringify(error.response?.data, null, 2)}`);
-    throw error;
-  }
-}
-
-/**
- * Call the AI Agent API asynchronously with event_source_target.
+ * Call the AI Agent API asynchronously using the DevRev SDK.
  */
 async function callAIAgentAsync(
   message: string,
@@ -231,12 +186,13 @@ async function callAIAgentAsync(
   config: any,
   token: string
 ): Promise<void> {
-  const apiUrl = `${config.devrevEndpoint}/internal/ai-agents.events.execute-async`;
-  
   if (!config.aiAgentEventsSourceId) {
     throw new Error('ai-agent-events event source ID not available');
   }
-  
+
+  console.log(`[AI Agent] Using endpoint: ${config.devrevEndpoint}, token type: ${token === config.serviceAccountToken ? 'service_account' : 'act_as'}`);
+  const sdk = client.setupBeta({ endpoint: config.devrevEndpoint, token });
+
   const payload: any = {
     agent: config.aiAgentId,
     session_object: sessionId,
@@ -246,57 +202,18 @@ async function callAIAgentAsync(
       slack_bot_token: config.slackBotToken,
       conversation_reference: conversationRef,
     },
-    target: 'event_source_target',
     event_source_target: {
       event_source: config.aiAgentEventsSourceId,
     },
+    target: 'event_source_target',
   };
 
   try {
-    await axios.post(apiUrl, payload, {
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      timeout: 30000,
-    });
+    await sdk.aiAgentEventsExecuteAsync(payload);
   } catch (error: any) {
     console.error(`[AI Agent Error Async] Status: ${error.response?.status}`);
     console.error(`[AI Agent Error Response] ${JSON.stringify(error.response?.data, null, 2)}`);
     throw error;
-  }
-}
-
-/**
- * Parse AI Agent response (handles SSE and JSON formats).
- */
-function parseAgentResponse(data: any): string {
-  const responseText = typeof data === 'string' ? data : JSON.stringify(data);
-
-  if (responseText.includes('data:')) {
-    const lines = responseText.split('\n');
-    for (const line of lines) {
-      if (!line.trim().startsWith('data:')) continue;
-
-      try {
-        const jsonStr = line.replace('data:', '').trim();
-        if (!jsonStr) continue;
-
-        const parsed = JSON.parse(jsonStr);
-        const msg = parsed.response === 'message' ? parsed.message : (parsed.output_message?.message || parsed.message);
-        if (msg) return msg;
-      } catch {
-        continue;
-      }
-    }
-    return responseText;
-  }
-
-  try {
-    const jsonData = typeof data === 'object' ? data : JSON.parse(responseText);
-    return jsonData.message || jsonData.output_message?.message || responseText;
-  } catch {
-    return responseText;
   }
 }
 
