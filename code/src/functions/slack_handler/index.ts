@@ -72,7 +72,7 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
     console.error(`[${requestId}] [CONFIG] Mock email address has invalid format: "${config.mockEmailRaw}"`);
     await sendMessage(
       extractConversationReference(slackEvent).channel,
-      `⚠️ Configuration error: The mock email address \`${config.mockEmailRaw}\` is not a valid email format. Please fix it in the snap-in settings.`,
+      `Sorry, something went wrong. Please try again or contact your admin.`,
       config.slackBotToken,
       slackEvent.thread_ts || undefined
     ).catch(() => {});
@@ -106,7 +106,7 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
         console.warn(`[${requestId}] [AUTH] User ${userEmail} is not in DevRev org — rejecting`);
         await sendMessage(
           conversationRef.channel,
-          `Sorry, your account (${userEmail}) is not part of the DevRev organization. Please contact your admin to get access.`,
+          `Sorry, something went wrong. Please try again or contact your admin.`,
           config.slackBotToken,
           slackEvent.thread_ts || undefined
         ).catch(() => {});
