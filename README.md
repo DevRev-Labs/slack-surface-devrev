@@ -18,7 +18,7 @@ A DevRev snap-in that integrates Slack with DevRev AI Agents. Receive messages f
 3. Snap-in sends a "Searching..." message and forwards the query to AI Agents
 4. AI Agent processes the request asynchronously
 5. Progress updates are shown as the AI works (Analyzing, Processing, etc.)
-6. Final response replaces the temporary message in Slack
+6. Final response is sent back to the Slack thread
 
 ## Features
 
@@ -26,6 +26,7 @@ A DevRev snap-in that integrates Slack with DevRev AI Agents. Receive messages f
 - **Progress Updates**: Shows real-time progress as the AI Agent works
 - **Thread Support**: Maintains conversation context within Slack threads
 - **Clean UX**: Temporary messages are deleted when final response arrives
+- **Mock Email (Testing)**: Override the sender identity for testing without a real Slack account
 
 ## Prerequisites
 
@@ -76,36 +77,60 @@ Go to **OAuth & Permissions** and add these Bot Token Scopes:
 
 ## Configuration
 
-| Input | Description |
-|-------|-------------|
-| `ai_agent_id` | The DevRev AI Agent ID to process messages |
-| `slack_bot_token` | Slack Bot User OAuth Token (stored as keyring) |
-| `slack_signing_secret` | Slack Signing Secret (stored as keyring) |
+| Input | Required | Description |
+|-------|----------|-------------|
+| `ai_agent_id` | Yes | The DevRev AI Agent ID to process messages |
+| `slack_bot_token` | Yes | Slack Bot User OAuth Token (stored as keyring) |
+| `slack_signing_secret` | Yes | Slack Signing Secret (stored as keyring) |
+| `mock_email_address` | No | If you have a DevRev email ID which you wish to mock in any surface, enter it here. If it is a valid email address, it will appear as if messages are coming from you regardless of who sends in Slack. If not present or invalid format, this is ignored. |
+
+## Mock Email Address — Behavior Matrix
+
+| Config Email | Slack User | Result |
+|---|---|---|
+| Valid DevRev email (e.g. `vijay@devrev.ai`) | Any | ✅ Mock used — AI runs as the configured user |
+| Non-DevRev email (e.g. `vijay@gmail.com`) | Any | ❌ User not found in DevRev org — request rejected with error message |
+| Invalid format (e.g. `notanemail`) | Any | ❌ Config error — bot replies immediately with format error, no fallback |
+| Not set (blank) | DevRev user | ✅ Real Slack email lookup — AI runs as that Slack user |
+| Not set (blank) | Non-DevRev user | ❌ User not found in DevRev org — request rejected with error message |
+| Not set (blank) | Slack API lookup fails | ⚠️ Falls back to service account token, AI still runs |
+
+## How Email Lookup Works
+
+1. **Get email from Slack** — The Slack user ID from the incoming event is passed to `users.info` API using the bot token to retrieve the user's email address.
+2. **Look up in DevRev** — That email is searched in your DevRev org via `devUsersList`. If no match, the request is rejected.
+3. **Get act-as token** — If the user exists, an impersonation token is created so the AI Agent runs with that user's permissions.
+4. **Fallback** — If act-as token creation fails (e.g. scope not yet granted), the service account token is used instead.
+
+With **mock email** configured, step 1 is skipped entirely and the mock email goes straight to step 2.
 
 ## Event Sources
 
 | Source | Description |
 |--------|-------------|
 | `slack-webhook-source` | Receives events from Slack Events API |
-| `ai-agent-events` | Receives async responses from AI Agents |
+| `ai-agent-events` | Receives async AI Agent responses and timeline entries |
 
 ## Functions
 
 | Function | Description |
 |----------|-------------|
-| `slack_handler` | Processes incoming Slack messages, forwards to AI Agent |
-| `ai_response_handler` | Receives AI responses, sends back to Slack |
+| `slack_handler` | Processes incoming Slack messages, creates DevRev conversation, calls AI Agent |
+| `ai_response_handler` | Receives AI responses and timeline entries, formats and sends back to Slack |
 
-## User Mapping
+## Logging
 
-The snap-in automatically maps Slack users to DevRev users:
+The snap-in emits structured logs at each key step. View them in DevRev → Settings → Snap-ins → Logs.
 
-1. When a message is received, the snap-in fetches the user's email from Slack
-2. It looks up the corresponding DevRev user by email
-3. An impersonation token is created for that user
-4. The AI Agent executes with the user's permissions
-
-This enables personalized responses based on the user's permissions from source systems.
+| Log Tag | Description |
+|---------|-------------|
+| `[MSG]` | Incoming message details (user, channel, text) |
+| `[AUTH]` | Email resolution, DevRev user lookup, token type selected (act-as PAT vs service account) |
+| `[CONV]` | DevRev conversation creation and session object |
+| `[AI]` | Message sent to AI Agent, agent ID, token type used |
+| `[AI_RESP]` | AI Agent response received, formatted, sent to Slack |
+| `[TIMELINE]` | Timeline entry fallback path (when ai_agent_response event is missing) |
+| `[STORE]` | Conversation reference storage and retrieval |
 
 ## Troubleshooting
 
@@ -120,13 +145,21 @@ This enables personalized responses based on the user's permissions from source 
 - Check that the AI Agent is active and configured
 - Look for errors in the snap-in logs
 
+### Org queries returning no data (e.g. "list all users")
+- Ensure the AI Agent has NLToSQL or HybridSearch skills enabled
+- Verify the snap-in service account has sufficient permissions in the org
+- Check that the DevRev org has data to query
+
 ### User not being recognized
 - Ensure the Slack user's email matches their DevRev account email
 - Verify the bot has `users:read.email` permission
 - Check that the DevRev user exists and is active
 
+### Mock email configuration error
+- If the bot replies with a config error message, the `mock_email_address` field contains an invalid email format
+- Fix or clear the value in snap-in settings
+
 ### Response not sent back to Slack
 - Verify the Slack Bot Token is valid
 - Check that the bot has `chat:write` permission
 - Ensure the bot is a member of the channel
-

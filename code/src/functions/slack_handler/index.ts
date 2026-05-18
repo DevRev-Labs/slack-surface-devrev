@@ -67,6 +67,18 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
     return { status: 'error', reason: 'Slack Bot Token not configured' };
   }
 
+  // If mock email was entered but has invalid format, reject immediately — don't silently fall back
+  if (config.mockEmailRaw && !config.mockEmailAddress) {
+    console.error(`[${requestId}] [CONFIG] Mock email address has invalid format: "${config.mockEmailRaw}"`);
+    await sendMessage(
+      extractConversationReference(slackEvent).channel,
+      `⚠️ Configuration error: The mock email address \`${config.mockEmailRaw}\` is not a valid email format. Please fix it in the snap-in settings.`,
+      config.slackBotToken,
+      slackEvent.thread_ts || undefined
+    ).catch(() => {});
+    return { status: 'error', reason: 'Invalid mock email address format in config' };
+  }
+
   const conversationRef = extractConversationReference(slackEvent);
   const sessionId = generateSessionId(slackEvent);
   
@@ -78,13 +90,16 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
 
   // Verify user is in DevRev org and get act-as token for user-scoped AI execution
   let userToken = config.serviceAccountToken;
+  let tokenType = 'service_account';
+
+  console.log(`[${requestId}] [MSG] Incoming message from Slack user: ${slackEvent.user}, channel: ${conversationRef.channel}, text: "${cleanedMessage.substring(0, 100)}"`);
 
   try {
-    console.log(`[${requestId}] [AUTH] Looking up email for Slack user: ${slackEvent.user}`);
-    const userEmail = await getUserEmail(slackEvent.user, config.slackBotToken);
+    console.log(`[${requestId}] [AUTH] Resolving email for Slack user: ${slackEvent.user}${config.mockEmailAddress ? ' (mock override active)' : ''}`);
+    const userEmail = await resolveUserEmail(slackEvent.user, config.slackBotToken, config.mockEmailAddress);
 
     if (userEmail) {
-      console.log(`[${requestId}] [AUTH] Found user email: ${userEmail}`);
+      console.log(`[${requestId}] [AUTH] Resolved user email: ${userEmail}${config.mockEmailAddress ? ' [MOCKED]' : ''}`);
       const devrevUserId = await findUserByEmail(userEmail, config.devrevEndpointInternal, config.serviceAccountToken);
 
       if (!devrevUserId) {
@@ -98,20 +113,23 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
         return { status: 'ignored', reason: 'User not in DevRev org' };
       }
 
-      console.log(`[${requestId}] [AUTH] User verified in org: ${devrevUserId}, trying act-as token`);
+      console.log(`[${requestId}] [AUTH] User verified in DevRev org: ${devrevUserId}, attempting act-as token`);
       const actAsToken = await getOrCreateActAsToken(devrevUserId, config.devrevEndpointInternal, config.serviceAccountToken);
       if (actAsToken) {
         userToken = actAsToken;
-        console.log(`[${requestId}] [AUTH] Using act-as token for user-scoped AI execution`);
+        tokenType = 'act_as (user PAT)';
+        console.log(`[${requestId}] [AUTH] Using act-as (user PAT) for user-scoped AI execution: ${userEmail}`);
       } else {
-        console.warn(`[${requestId}] [AUTH] act-as failed, falling back to service account token`);
+        console.warn(`[${requestId}] [AUTH] act-as token failed, falling back to service account PAT`);
       }
     } else {
-      console.warn(`[${requestId}] [AUTH] Could not get user email from Slack for user: ${slackEvent.user}`);
+      console.warn(`[${requestId}] [AUTH] Could not resolve email for Slack user: ${slackEvent.user} — using service account PAT`);
     }
   } catch (authError: any) {
-    console.warn(`[${requestId}] [AUTH] Auth lookup failed:`, authError.message);
+    console.warn(`[${requestId}] [AUTH] Auth lookup failed, using service account PAT:`, authError.message);
   }
+
+  console.log(`[${requestId}] [AUTH] Token selected: ${tokenType}`);
 
   try {
     console.log(`[${requestId}] [SLACK] Sending initial 'Searching...' message to channel: ${conversationRef.channel}, thread: ${threadTs}`);
@@ -125,17 +143,29 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
 
     conversationRef.tempMessageTs = tempMessageTs;
     conversationRef.threadTs = threadTs;
-    storeConversationReference(sessionId, conversationRef);
-    console.log(`[${requestId}] [STORE] Conversation reference stored for session: ${sessionId}`);
 
-    console.log(`[${requestId}] [AI] Calling AI Agent async, agentId: ${config.aiAgentId}, sessionId: ${sessionId}`);
-    await callAIAgentAsync(cleanedMessage, sessionId, conversationRef, config, userToken);
-    console.log(`[${requestId}] [AI] Async AI Agent call submitted successfully`);
+    // Create a real DevRev conversation so the AI agent has org context for data queries
+    console.log(`[${requestId}] [CONV] Creating DevRev conversation for org context`);
+    const devrevConversationId = await createDevRevConversation(
+      cleanedMessage,
+      config.devrevEndpoint,
+      config.serviceAccountToken
+    );
+    const sessionObject = devrevConversationId || sessionId;
+    console.log(`[${requestId}] [CONV] session_object: ${sessionObject} (${devrevConversationId ? 'conversation DON' : 'fallback session id'})`);
+
+    storeConversationReference(sessionObject, conversationRef);
+    console.log(`[${requestId}] [STORE] Conversation reference stored for session: ${sessionObject}`);
+
+    console.log(`[${requestId}] [AI] Sending message to agent: agentId=${config.aiAgentId}, sessionObject=${sessionObject}, tokenType=${tokenType}`);
+    console.log(`[${requestId}] [AI] Message to agent: "${cleanedMessage.substring(0, 200)}"`);
+    await callAIAgentAsync(cleanedMessage, sessionObject, conversationRef, config, userToken);
+    console.log(`[${requestId}] [AI] Message submitted to AI Agent successfully`);
 
     return {
       status: 'success',
       mode: 'async',
-      session_id: sessionId,
+      session_id: sessionObject,
       message: 'Request submitted, responses will be sent via ai_agent_response events',
     };
   } catch (error: any) {
@@ -160,11 +190,12 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
 
 /**
  * Extract configuration from event.
- * 
+ *
  * Purpose: Gathers all necessary IDs, tokens, and endpoints from the function input metadata and global configuration.
  */
 function extractConfig(event: FunctionInput): any {
   const { input_data, execution_metadata, context } = event;
+  const mockEmail = (input_data.global_values['mock_email_address'] || '').trim();
   return {
     aiAgentId: input_data.global_values.ai_agent_id,
     slackBotToken: input_data.keyrings['slack_bot_token'],
@@ -173,7 +204,64 @@ function extractConfig(event: FunctionInput): any {
     devrevEndpointInternal: execution_metadata.devrev_endpoint.replace(/\/$/, ''),
     serviceAccountToken: context.secrets.service_account_token,
     aiAgentEventsSourceId: input_data.event_sources?.['ai-agent-events'],
+    mockEmailRaw: mockEmail || null,
+    mockEmailAddress: isValidEmail(mockEmail) ? mockEmail : null as string | null,
   };
+}
+
+/**
+ * Resolve the email address for a Slack user.
+ * If mock_email_address is configured (testing), use it instead of real lookup.
+ * To revert to real lookup only: remove the mockEmail branch and the mock_email_address input.
+ */
+async function resolveUserEmail(
+  slackUserId: string,
+  slackBotToken: string,
+  mockEmail: string | null
+): Promise<string | null> {
+  if (mockEmail) {
+    return mockEmail;
+  }
+  return getUserEmail(slackUserId, slackBotToken);
+}
+
+function isValidEmail(email: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+/**
+ * Create a DevRev support conversation so the AI agent has org context.
+ * Returns the conversation DON or null if creation fails.
+ */
+async function createDevRevConversation(
+  message: string,
+  endpoint: string,
+  token: string
+): Promise<string | null> {
+  try {
+    const sdk = client.setupBeta({ endpoint, token });
+    const response = await sdk.conversationsCreate({
+      title: message.substring(0, 100),
+      type: betaSDK.ConversationsCreateRequestTypeValue.Support,
+    });
+    const id = response.data?.conversation?.id ?? null;
+    if (!id) return null;
+    console.log(`[Conversation] Created conversation: ${id}`);
+
+    // Post the message as a timeline entry so the AI agent has context
+    await sdk.timelineEntriesCreate({
+      object: id,
+      type: betaSDK.TimelineEntriesCreateRequestType.TimelineComment,
+      body: message,
+      visibility: betaSDK.TimelineEntryVisibility.External,
+    });
+    console.log(`[Conversation] Posted message to timeline`);
+
+    return id;
+  } catch (error: any) {
+    console.error('[Conversation] Failed to create conversation:', error.response?.data || error.message);
+    return null;
+  }
 }
 
 /**
@@ -181,7 +269,7 @@ function extractConfig(event: FunctionInput): any {
  */
 async function callAIAgentAsync(
   message: string,
-  sessionId: string,
+  sessionObject: string,
   conversationRef: ConversationReference,
   config: any,
   token: string
@@ -195,10 +283,10 @@ async function callAIAgentAsync(
 
   const payload: any = {
     agent: config.aiAgentId,
-    session_object: sessionId,
+    session_object: sessionObject,
     event: { input_message: { message } },
     client_metadata: {
-      session_id: sessionId,
+      session_id: sessionObject,
       slack_bot_token: config.slackBotToken,
       conversation_reference: conversationRef,
     },

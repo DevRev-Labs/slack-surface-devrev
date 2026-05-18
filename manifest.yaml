@@ -4,17 +4,9 @@ description: "DevRev snap-in that integrates Slack with DevRev AI Agents. Receiv
 
 service_account:
   display_name: Slack AI Integration Bot
-  scopes:
-    self:
-      - scope: dev_user:read
-        optional: false
-        reason: "Read DevRev user details for email-based user mapping"
-      - scope: ai_agent:read
-        optional: true
-        reason: "Read AI Agent details to invoke agents"
-      - scope: ai_agent:execute
-        optional: true
-        reason: "Execute AI Agent for processing Slack messages"
+  # TODO: Add explicit scopes once valid scope names are confirmed:
+  # dev_user:read, ai_agent:read, ai_agent:execute, conversation:write, conversation:read
+  # + scopes needed for NLToSQL (work, users, parts read access)
 
 inputs:
   organization:
@@ -25,6 +17,14 @@ inputs:
       description: The ID of the DevRev AI Agent to use for processing messages.
       ui:
         display_name: AI Agent ID
+
+    - name: mock_email_address
+      field_type: text
+      is_required: false
+      default_value: ""
+      description: "If you have a DevRev email ID which you wish to mock in any surface, then enter it here. If it is a valid email address then it will appear as if the messages are coming from you from any surface such as Slack or Teams. If email address is not present, then this will be ignored."
+      ui:
+        display_name: Mock Email Address (Testing)
 
 keyrings:
   organization:
@@ -116,6 +116,7 @@ event_sources:
       config:
         event_types:
           - ai_agent_response
+          - timeline_entry_created
 
 functions:
   - name: slack_handler
@@ -137,4 +138,5 @@ automations:
     source: ai-agent-events
     event_types:
       - ai_agent_response
+      - timeline_entry_created
     function: ai_response_handler

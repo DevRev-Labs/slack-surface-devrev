@@ -20,7 +20,12 @@ import { sendMessage, updateMessage, deleteMessage } from '../../utils/slack-cli
 async function handleAIResponse(event: FunctionInput): Promise<any> {
   const { payload, execution_metadata, input_data } = event;
   const requestId = execution_metadata.request_id;
-  
+
+  // Handle timeline_entry_created fallback — catches agent replies posted to the conversation
+  if (payload.timeline_entry_created) {
+    return await handleTimelineEntry(event);
+  }
+
   console.log(`[${requestId}] [AI_RESP] Raw payload keys: ${Object.keys(payload).join(', ')}`);
 
   const clientMetadata = payload.client_metadata || payload.ai_agent_response?.client_metadata || {};
@@ -175,8 +180,10 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
 
   // Send the final response
   try {
-    await sendMessage(conversationRef.channel, responseText, slackBotToken, threadTs);
-    console.log(`[${requestId}] [AI_RESP] Final response sent successfully`);
+    const formattedResponse = formatForSlack(responseText);
+    console.log(`[${requestId}] [AI_RESP] Response from agent: "${responseText.substring(0, 200)}${responseText.length > 200 ? '...' : ''}"`);
+    await sendMessage(conversationRef.channel, formattedResponse, slackBotToken, threadTs);
+    console.log(`[${requestId}] [AI_RESP] Final response sent successfully to channel: ${conversationRef.channel}, thread: ${threadTs ?? 'none'}`);
     return {
       status: 'success',
       message: 'AI response sent to Slack',
@@ -190,6 +197,174 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
       details: error.message,
     };
   }
+}
+
+/**
+ * Handle timeline_entry_created events — forward agent-authored timeline comments to Slack.
+ * This is the fallback path for when ai_agent_response events don't arrive.
+ */
+async function handleTimelineEntry(event: FunctionInput): Promise<any> {
+  const { payload, execution_metadata, input_data } = event;
+  const requestId = execution_metadata.request_id;
+
+  const entry = payload.timeline_entry_created?.entry;
+  if (!entry) {
+    return { status: 'ignored', reason: 'No timeline entry in payload' };
+  }
+
+  // Only forward external-visibility comments
+  if (entry.visibility !== 'external' && entry.visibility !== 'public') {
+    console.log(`[${requestId}] [TIMELINE] Skipping non-external entry, visibility: ${entry.visibility}`);
+    return { status: 'ignored', reason: 'Non-external timeline entry' };
+  }
+
+  // Skip entries not on a conversation
+  const objectId: string | undefined = entry.object?.id ?? entry.object;
+  if (!objectId || !objectId.includes(':conversation/')) {
+    return { status: 'ignored', reason: 'Not a conversation timeline entry' };
+  }
+
+  // Look up conversation reference by conversation DON
+  const conversationRef: ConversationReference | undefined = getConversationReference(objectId);
+  if (!conversationRef) {
+    console.log(`[${requestId}] [TIMELINE] No conversation ref for ${objectId}, ignoring`);
+    return { status: 'ignored', reason: 'No conversation reference found for conversation' };
+  }
+
+  const body: string = entry.text || entry.body || '';
+  if (!body.trim()) {
+    return { status: 'ignored', reason: 'Empty timeline entry body' };
+  }
+
+  // Skip entries authored by the snap-in service account (avoid echo loop)
+  const serviceAccountId: string | undefined = event.context?.service_account_id;
+  const authorId: string | undefined = entry.created_by?.id;
+  if (serviceAccountId && authorId && authorId === serviceAccountId) {
+    console.log(`[${requestId}] [TIMELINE] Skipping self-authored timeline entry`);
+    return { status: 'ignored', reason: 'Self-authored entry' };
+  }
+
+  const slackBotToken = input_data.keyrings['slack_bot_token'];
+  if (!slackBotToken) {
+    return { status: 'error', reason: 'Slack Bot Token not configured' };
+  }
+
+  const threadTs = conversationRef.threadTs || conversationRef.messageTs;
+
+  // Delete temp "Searching..." message if present
+  if (conversationRef.tempMessageTs) {
+    try {
+      await deleteMessage(conversationRef.channel, conversationRef.tempMessageTs, slackBotToken);
+      delete conversationRef.tempMessageTs;
+      storeConversationReference(objectId, conversationRef);
+    } catch (e: any) {
+      console.warn(`[${requestId}] [TIMELINE] Failed to delete temp message:`, e.message);
+    }
+  }
+
+  try {
+    await sendMessage(conversationRef.channel, toSlackMarkdown(body), slackBotToken, threadTs);
+    console.log(`[${requestId}] [TIMELINE] Forwarded timeline entry to Slack`);
+    return { status: 'success', message: 'Timeline entry forwarded to Slack' };
+  } catch (error: any) {
+    console.error(`[${requestId}] [TIMELINE] Failed to send to Slack:`, error.message);
+    return { status: 'error', reason: 'Failed to send timeline entry to Slack' };
+  }
+}
+
+/**
+ * Convert standard markdown to Slack mrkdwn format.
+ */
+function toSlackMarkdown(text: string): string {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, '*$1*')
+    .replace(/~~(.+?)~~/g, '~$1~')
+    .replace(/^#{1,6}\s+(.+)$/gm, '*$1*')
+    .replace(/^\s*[-*]\s+/gm, '• ')
+    .replace(/\[(.+?)\]\((.+?)\)/g, '<$2|$1>');
+}
+
+/**
+ * Format an AI agent response for clean Slack display.
+ * - Strips raw DevRev DON identifiers
+ * - Converts markdown tables to plain text
+ * - Converts markdown to Slack mrkdwn
+ */
+function formatForSlack(text: string): string {
+  let formatted = text;
+
+  // Remove DONs wrapped in [<don:...>] (with angle brackets)
+  formatted = formatted.replace(/\s*\[<don:[^\]]+>\]/g, '');
+
+  // Remove DONs wrapped in [don:...] (without angle brackets)
+  formatted = formatted.replace(/\s*\[don:[^\]]+\]/g, '');
+
+  // Remove bare inline DONs
+  formatted = formatted.replace(/\bdon:[a-z0-9:/_-]+/g, '');
+
+  // Convert markdown tables to readable plain text
+  formatted = convertTableToText(formatted);
+
+  // Clean up leftover empty parens and extra spaces
+  formatted = formatted.replace(/\(\s*\)/g, '');
+  formatted = formatted.replace(/  +/g, ' ');
+  formatted = formatted.trim();
+
+  return toSlackMarkdown(formatted);
+}
+
+/**
+ * Convert a markdown table into a numbered list for Slack.
+ * Input:  | # | Name | Email |
+ *         |---|------|-------|
+ *         | 1 | Alice | alice@x.com |
+ * Output: 1. *Alice* — alice@x.com
+ */
+function convertTableToText(text: string): string {
+  const lines = text.split('\n');
+  const result: string[] = [];
+  let headers: string[] = [];
+  let inTable = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('|')) {
+      if (inTable) inTable = false;
+      result.push(line);
+      continue;
+    }
+
+    const cells = trimmed.split('|').map(c => c.trim()).filter(c => c.length > 0);
+
+    // Separator row (---|---|---)
+    if (cells.every(c => /^[-:]+$/.test(c))) {
+      inTable = true;
+      continue;
+    }
+
+    if (!inTable) {
+      // This is the header row
+      headers = cells;
+      inTable = true;
+      continue;
+    }
+
+    // Data row — format as "Field: Value, Field: Value"
+    if (headers.length > 0) {
+      const parts = cells.map((cell, i) => {
+        const header = headers[i] || '';
+        // Skip index/number columns (#, No, Index)
+        if (/^#$|^no\.?$|^index$/i.test(header)) return null;
+        if (!cell || cell === '-') return null;
+        return header ? `${header}: ${cell}` : cell;
+      }).filter(Boolean);
+      result.push(`• ${parts.join(' | ')}`);
+    } else {
+      result.push(`• ${cells.join(' | ')}`);
+    }
+  }
+
+  return result.join('\n');
 }
 
 /**
@@ -313,11 +488,13 @@ function extractResponseText(payload: any): string | null {
   if (!payload) return null;
 
   const fields = [
+    'ai_agent_response.message',
+    'ai_agent_response.response.output_message.message',
+    'ai_agent_response.text',
     'text', 'response', 'message', 'output',
     'result.text', 'result.response', 'result.message', 'result',
     'data.text', 'data.response', 'data.message', 'data',
     'execution_result.output', 'execution_result.response',
-    'ai_agent_response.message', 'ai_agent_response.text'
   ];
 
   for (const field of fields) {
