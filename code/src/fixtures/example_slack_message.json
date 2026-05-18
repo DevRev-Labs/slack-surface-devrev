@@ -1,0 +1,46 @@
+{
+  "payload": {
+    "token": "verification-token",
+    "team_id": "T0123456789",
+    "api_app_id": "A0123456789",
+    "event": {
+      "type": "app_mention",
+      "user": "U0123456789",
+      "text": "<@U9876543210> What is the status of my ticket?",
+      "ts": "1705315800.000100",
+      "channel": "C0123456789",
+      "event_ts": "1705315800.000100"
+    },
+    "type": "event_callback",
+    "event_id": "Ev0123456789",
+    "event_time": 1705315800
+  },
+  "context": {
+    "dev_oid": "DEV-123",
+    "source_id": "source-123",
+    "snap_in_id": "snap-in-123",
+    "snap_in_version_id": "snap-in-version-123",
+    "service_account_id": "service-account-123",
+    "secrets": {
+      "service_account_token": "test-service-account-token"
+    }
+  },
+  "execution_metadata": {
+    "request_id": "req-123",
+    "function_name": "slack_handler",
+    "event_type": "custom:slack-message",
+    "devrev_endpoint": "https://api.devrev.ai/"
+  },
+  "input_data": {
+    "global_values": {
+      "ai_agent_id": "don:core:dvrv-us-1:devo/123:ai_agent/456"
+    },
+    "event_sources": {
+      "ai-agent-events": "event-source-id-456"
+    },
+    "keyrings": {
+      "slack_bot_token": "xoxb-test-bot-token",
+      "slack_signing_secret": "test-signing-secret"
+    }
+  }
+}

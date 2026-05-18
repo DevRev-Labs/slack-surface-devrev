@@ -1,0 +1,142 @@
+version: "2"
+name: "slack-ai-integration"
+description: "DevRev snap-in that integrates Slack with DevRev AI Agents. Receives messages from Slack, processes them through AI Agents, and sends responses back."
+
+service_account:
+  display_name: Slack AI Integration Bot
+  # TODO: Add explicit scopes once valid scope names are confirmed:
+  # dev_user:read, ai_agent:read, ai_agent:execute, conversation:write, conversation:read
+  # + scopes needed for NLToSQL (work, users, parts read access)
+
+inputs:
+  organization:
+    - name: ai_agent_id
+      field_type: text
+      is_required: true
+      default_value: ""
+      description: The ID of the DevRev AI Agent to use for processing messages.
+      ui:
+        display_name: AI Agent ID
+
+    - name: mock_email_address
+      field_type: text
+      is_required: false
+      default_value: ""
+      description: "If you have a DevRev email ID which you wish to mock in any surface, then enter it here. If it is a valid email address then it will appear as if the messages are coming from you from any surface such as Slack or Teams. If email address is not present, then this will be ignored."
+      ui:
+        display_name: Mock Email Address (Testing)
+
+keyrings:
+  organization:
+    - name: slack_bot_token
+      display_name: Slack Bot Token
+      description: The Bot User OAuth Token from your Slack App (starts with xoxb-).
+      types:
+        - snap_in_secret
+
+    - name: slack_signing_secret
+      display_name: Slack Signing Secret
+      description: The Signing Secret from your Slack App's Basic Information page. Used to verify requests from Slack.
+      types:
+        - snap_in_secret
+
+event_sources:
+  organization:
+    - name: slack-webhook-source
+      description: Receives events from Slack Events API.
+      display_name: Slack Events Webhook
+      type: flow-custom-webhook
+      config:
+        policy: |
+          package rego
+          
+          import future.keywords.if
+          
+          # Handle Slack URL verification challenge
+          output = {"response": response} if {
+            input.request.body.type == "url_verification"
+            response := {
+              "status_code": 200,
+              "body": {"challenge": input.request.body.challenge},
+              "headers": {"Content-Type": "application/json"}
+            }
+          }
+          
+          # Handle regular Slack events
+          output = {"event": event, "event_key": event_key} if {
+            input.request.method == "POST"
+            input.request.body.type == "event_callback"
+            event := input.request.body
+            event_key := "slack-message"
+          }
+          
+          # Reject other requests
+          output = {"response": response} if {
+            not input.request.body.type == "url_verification"
+            not input.request.body.type == "event_callback"
+            response := {
+              "status_code": 400,
+              "body": "Invalid request"
+            }
+          }
+      setup_instructions: |
+        ## Slack App Setup
+        
+        1. Create a Slack App at [api.slack.com/apps](https://api.slack.com/apps):
+           - Click "Create New App" > "From scratch"
+           - Name your app and select your workspace
+        
+        2. Configure Bot Token Scopes (OAuth & Permissions):
+           - `chat:write` - Send and update messages
+           - `users:read` - Get user information
+           - `users:read.email` - Access user email addresses
+           - `app_mentions:read` - Receive @mentions
+        
+        3. Enable Event Subscriptions:
+           - Turn on "Enable Events"
+           - Set Request URL to: `{{ source.trigger_url }}`
+           - Subscribe to bot events: `app_mention`
+           - Optionally add: `message.im` for direct messages
+        
+        4. Install the app to your workspace:
+           - Go to "Install App" and click "Install to Workspace"
+           - Copy the **Bot User OAuth Token** (starts with `xoxb-`)
+        
+        5. Get the Signing Secret:
+           - Go to "Basic Information"
+           - Copy the **Signing Secret**
+        
+        6. Enter both tokens during snap-in installation.
+
+    # Native DevRev event source for AI Agent responses
+    - name: ai-agent-events
+      description: Receives AI Agent response events directly from DevRev.
+      display_name: AI Agent Events
+      type: devrev-webhook
+      config:
+        event_types:
+          - ai_agent_response
+          - timeline_entry_created
+
+functions:
+  - name: slack_handler
+    description: Handles incoming messages from Slack and forwards them to AI Agents.
+
+  - name: ai_response_handler
+    description: Handles async responses from AI Agents and sends them back to Slack.
+
+automations:
+  - name: handle-slack-message
+    description: Process incoming Slack messages
+    source: slack-webhook-source
+    event_types:
+      - custom:slack-message
+    function: slack_handler
+
+  - name: handle-ai-response
+    description: Process AI Agent responses and send to Slack
+    source: ai-agent-events
+    event_types:
+      - ai_agent_response
+      - timeline_entry_created
+    function: ai_response_handler
