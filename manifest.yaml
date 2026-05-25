@@ -4,9 +4,23 @@ description: "DevRev snap-in that integrates Slack with DevRev AI Agents. Receiv
 
 service_account:
   display_name: Slack AI Integration Bot
-  # TODO: Add explicit scopes once valid scope names are confirmed:
-  # dev_user:read, ai_agent:read, ai_agent:execute, conversation:write, conversation:read
-  # + scopes needed for NLToSQL (work, users, parts read access)
+  scopes:
+    self:
+      - scope: dev_user:read
+        optional: false
+        reason: "Resolve the Slack sender's email to a DevRev user via /dev-users.list?email= before minting an act-as token. Read-only — never creates or updates dev users."
+      - scope: ai_agent:execute
+        optional: false
+        reason: "Fallback path: when no DevU is resolvable for the Slack sender, the SA token calls /internal/ai-agents.events.execute-async directly to run the AI Agent."
+      - scope: conversation:write
+        optional: false
+        reason: "Create a DevRev support conversation (sdk.conversationsCreate) and append the user's message as a timeline entry (sdk.timelineEntriesCreate) so the AI Agent has org context for data queries."
+    impersonate:
+      - act_as: all_devusers
+        scopes:
+          - scope: ai_agent:execute
+            optional: false
+            reason: "Run AI Agent on behalf of the resolved Dev user via /internal/ai-agents.events.execute-async after minting an act-as token."
 
 inputs:
   organization:
@@ -49,10 +63,11 @@ event_sources:
       config:
         policy: |
           package rego
-          
+
           import future.keywords.if
-          
-          # Handle Slack URL verification challenge
+
+          # Handle Slack URL verification challenge inline so Slack's setup
+          # flow succeeds even though the function rejects unsigned bodies.
           output = {"response": response} if {
             input.request.body.type == "url_verification"
             response := {
@@ -61,15 +76,25 @@ event_sources:
               "headers": {"Content-Type": "application/json"}
             }
           }
-          
-          # Handle regular Slack events
+
+          # Forward POST bodies + headers + body_raw to the function.
+          # body_raw is base64-encoded raw request bytes — required for the
+          # function to recompute Slack's HMAC (HMAC-SHA256 over the exact
+          # bytes Slack signed). HMAC verification happens in slack_handler
+          # — see code/src/utils/slack-signature-validator.ts.
+          # We must not gate on header presence in Rego: missing signatures
+          # must reach the function so it can return a clean 403.
           output = {"event": event, "event_key": event_key} if {
             input.request.method == "POST"
             input.request.body.type == "event_callback"
-            event := input.request.body
+            event := {
+              "body": input.request.body,
+              "body_raw": input.request.body_raw,
+              "headers": input.request.headers
+            }
             event_key := "slack-message"
           }
-          
+
           # Reject other requests
           output = {"response": response} if {
             not input.request.body.type == "url_verification"
