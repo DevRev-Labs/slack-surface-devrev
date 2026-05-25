@@ -14,6 +14,9 @@ import {
 } from '../../utils/conversation-store';
 import { sendMessage, getUserEmail, removeBotMention } from '../../utils/slack-client';
 import { findUserByEmail, getOrCreateActAsToken } from '../../utils/devrev-auth';
+import { validateSlackSignature } from '../../utils/slack-signature-validator';
+
+const FORBIDDEN_RESPONSE = { status: 'forbidden', status_code: 403 };
 
 /**
  * Main handler for Slack messages.
@@ -27,10 +30,27 @@ import { findUserByEmail, getOrCreateActAsToken } from '../../utils/devrev-auth'
 async function handleSlackMessage(event: FunctionInput): Promise<any> {
   const payload = event.payload;
   const requestId = event.execution_metadata.request_id;
-  
+
+  // The Rego policy now wraps inbound requests as { body, headers } so the
+  // function can verify the Slack signature. Older payload shape (the parsed
+  // Slack event directly) is preserved for backwards-compatible test fixtures.
+  const wrapped =
+    payload && typeof payload === 'object' && 'body' in payload && 'headers' in payload
+      ? payload
+      : null;
+  const slackBody = wrapped ? wrapped.body : payload;
+  const requestHeaders: Record<string, any> | undefined = wrapped ? wrapped.headers : undefined;
+
+  const signingSecret = event.input_data.keyrings?.['slack_signing_secret'];
+  const sigCheck = validateSlackSignature(signingSecret, requestHeaders, slackBody);
+  if (!sigCheck.valid) {
+    console.warn(`[${requestId}] [auth] Slack signature rejected: ${sigCheck.reason}`);
+    return FORBIDDEN_RESPONSE;
+  }
+
   // Extract the Slack event from the event_callback payload
-  const slackEvent = payload.event;
-  
+  const slackEvent = slackBody?.event;
+
   if (!slackEvent) {
     return { status: 'ignored', reason: 'No event in payload' };
   }

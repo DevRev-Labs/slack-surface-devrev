@@ -8,6 +8,9 @@ import { FunctionInput } from '../../../types';
 jest.mock('../../../utils/conversation-store');
 jest.mock('../../../utils/slack-client');
 jest.mock('../../../utils/devrev-auth');
+jest.mock('../../../utils/slack-signature-validator', () => ({
+  validateSlackSignature: jest.fn(() => ({ valid: true })),
+}));
 jest.mock('axios');
 
 const mockedConvStore = convStore as jest.Mocked<typeof convStore>;
@@ -225,5 +228,47 @@ describe('slack_handler', () => {
         tempMessageTs: '1705315801.000200',
       })
     );
+  });
+
+  test('should return 403 when signature validation fails', async () => {
+    const validator = require('../../../utils/slack-signature-validator');
+    validator.validateSlackSignature.mockReturnValueOnce({
+      valid: false,
+      reason: 'Missing X-Slack-Signature header',
+    });
+
+    const result = await run([mockEvent]);
+    expect(result).toEqual({ status: 'forbidden', status_code: 403 });
+    // Must short-circuit before any downstream side effects.
+    expect(mockedSlackClient.sendMessage).not.toHaveBeenCalled();
+    expect(mockedAxios.post).not.toHaveBeenCalled();
+  });
+
+  test('should unwrap { body, headers } payload shape before processing', async () => {
+    const wrappedEvent: FunctionInput = {
+      ...mockEvent,
+      payload: {
+        body: mockEvent.payload,
+        headers: {
+          'x-slack-signature': 'v0=deadbeef',
+          'x-slack-request-timestamp': String(Math.floor(Date.now() / 1000)),
+        },
+      },
+    };
+
+    const validator = require('../../../utils/slack-signature-validator');
+    validator.validateSlackSignature.mockClear();
+
+    await run([wrappedEvent]);
+
+    // Validator must be called with the headers map and the inner Slack body —
+    // not the wrapper object — so HMAC computation matches Slack's input.
+    expect(validator.validateSlackSignature).toHaveBeenCalledWith(
+      'test-signing-secret',
+      expect.objectContaining({ 'x-slack-signature': expect.any(String) }),
+      expect.objectContaining({ type: 'event_callback' }),
+    );
+    // The handler must reach event-type handling (i.e. it unwrapped body.event).
+    expect(mockedSlackClient.removeBotMention).toHaveBeenCalled();
   });
 });
