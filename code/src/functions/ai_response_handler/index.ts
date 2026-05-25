@@ -5,7 +5,13 @@
  */
 
 import { FunctionInput } from '../../types';
-import { ConversationReference, getConversationReference, storeConversationReference } from '../../utils/conversation-store';
+import { ConversationReference } from '../../utils/conversation-store';
+import {
+  getConversationReference,
+  storeConversationReference,
+  StoreConfig,
+} from '../../utils/session-store';
+import { readSessionTimingConfig } from '../../utils/session-config';
 import { sendMessage, updateMessage, deleteMessage } from '../../utils/slack-client';
 
 /**
@@ -18,12 +24,18 @@ import { sendMessage, updateMessage, deleteMessage } from '../../utils/slack-cli
  *  - Promise<any>: A status object indicating success or failure of the message delivery.
  */
 async function handleAIResponse(event: FunctionInput): Promise<any> {
-  const { payload, execution_metadata, input_data } = event;
+  const { payload, execution_metadata, input_data, context } = event;
   const requestId = execution_metadata.request_id;
+
+  const storeConfig: StoreConfig = {
+    devrevEndpoint: execution_metadata.devrev_endpoint.replace(/\/$/, ''),
+    serviceAccountToken: context.secrets.service_account_token,
+    timing: readSessionTimingConfig(input_data.global_values),
+  };
 
   // Handle timeline_entry_created fallback — catches agent replies posted to the conversation
   if (payload.timeline_entry_created) {
-    return await handleTimelineEntry(event);
+    return await handleTimelineEntry(event, storeConfig);
   }
 
   console.log(`[${requestId}] [AI_RESP] Raw payload keys: ${Object.keys(payload).join(', ')}`);
@@ -39,8 +51,13 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
     return { status: 'error', reason: 'No session ID in response' };
   }
 
-  let conversationRef: ConversationReference | undefined = getConversationReference(sessionId);
-  console.log(`[${requestId}] [STORE] Conversation ref from in-memory store: ${conversationRef ? 'FOUND' : 'NOT FOUND'}`);
+  let conversationRef: ConversationReference | undefined;
+  try {
+    conversationRef = await getConversationReference(storeConfig, sessionId);
+  } catch (lookupErr: any) {
+    console.warn(`[${requestId}] [STORE] Lookup failed: ${lookupErr?.message || lookupErr}`);
+  }
+  console.log(`[${requestId}] [STORE] Conversation ref from custom-object store: ${conversationRef ? 'FOUND' : 'NOT FOUND'}`);
 
   if (!conversationRef) {
     const fromMetadata = clientMetadata.conversation_reference;
@@ -53,7 +70,11 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
         tempMessageTs: meta.tempMessageTs || meta.temp_message_ts || undefined,
         threadTs: meta.threadTs || meta.thread_ts || undefined,
       };
-      storeConversationReference(sessionId, conversationRef);
+      try {
+        await storeConversationReference(storeConfig, sessionId, conversationRef);
+      } catch (persistErr: any) {
+        console.warn(`[${requestId}] [STORE] Persist after recovery failed: ${persistErr?.message || persistErr}`);
+      }
       console.log(`[${requestId}] [STORE] Recovered conversation ref from metadata, channel: ${conversationRef.channel}, tempMsgTs: ${conversationRef.tempMessageTs ?? 'none'}, threadTs: ${conversationRef.threadTs ?? 'none'}`);
     }
   }
@@ -109,7 +130,9 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
               conversationRef.threadTs
             );
             conversationRef.tempMessageTs = ts;
-            storeConversationReference(sessionId, conversationRef);
+            await storeConversationReference(storeConfig, sessionId, conversationRef).catch((e: any) =>
+              console.warn(`[${requestId}] [STORE] persist after progress retry failed: ${e?.message || e}`)
+            );
           }
         } else {
           const ts = await sendMessage(
@@ -119,7 +142,9 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
             conversationRef.threadTs
           );
           conversationRef.tempMessageTs = ts;
-          storeConversationReference(sessionId, conversationRef);
+          await storeConversationReference(storeConfig, sessionId, conversationRef).catch((e: any) =>
+            console.warn(`[${requestId}] [STORE] persist after progress send failed: ${e?.message || e}`)
+          );
         }
         return { status: 'success', message: 'Progress update sent to Slack' };
       } catch (error: any) {
@@ -137,7 +162,9 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
       if (conversationRef.tempMessageTs) {
         await deleteMessage(conversationRef.channel, conversationRef.tempMessageTs, slackBotToken);
         delete conversationRef.tempMessageTs;
-        storeConversationReference(sessionId, conversationRef);
+        await storeConversationReference(storeConfig, sessionId, conversationRef).catch((e: any) =>
+          console.warn(`[${requestId}] [STORE] persist after error-temp-delete failed: ${e?.message || e}`)
+        );
       }
       
       await sendMessage(
@@ -172,7 +199,9 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
     try {
       await deleteMessage(conversationRef.channel, conversationRef.tempMessageTs, slackBotToken);
       delete conversationRef.tempMessageTs;
-      storeConversationReference(sessionId, conversationRef);
+      await storeConversationReference(storeConfig, sessionId, conversationRef).catch((e: any) =>
+        console.warn(`[${requestId}] [STORE] persist after temp-delete failed: ${e?.message || e}`)
+      );
     } catch (deleteErr: any) {
       console.warn(`[${requestId}] [AI_RESP] Failed to delete temp message (continuing):`, deleteErr.message);
     }
@@ -203,7 +232,7 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
  * Handle timeline_entry_created events — forward agent-authored timeline comments to Slack.
  * This is the fallback path for when ai_agent_response events don't arrive.
  */
-async function handleTimelineEntry(event: FunctionInput): Promise<any> {
+async function handleTimelineEntry(event: FunctionInput, storeConfig: StoreConfig): Promise<any> {
   const { payload, execution_metadata, input_data } = event;
   const requestId = execution_metadata.request_id;
 
@@ -225,7 +254,12 @@ async function handleTimelineEntry(event: FunctionInput): Promise<any> {
   }
 
   // Look up conversation reference by conversation DON
-  const conversationRef: ConversationReference | undefined = getConversationReference(objectId);
+  let conversationRef: ConversationReference | undefined;
+  try {
+    conversationRef = await getConversationReference(storeConfig, objectId);
+  } catch (lookupErr: any) {
+    console.warn(`[${requestId}] [TIMELINE] Lookup failed: ${lookupErr?.message || lookupErr}`);
+  }
   if (!conversationRef) {
     console.log(`[${requestId}] [TIMELINE] No conversation ref for ${objectId}, ignoring`);
     return { status: 'ignored', reason: 'No conversation reference found for conversation' };
@@ -256,7 +290,9 @@ async function handleTimelineEntry(event: FunctionInput): Promise<any> {
     try {
       await deleteMessage(conversationRef.channel, conversationRef.tempMessageTs, slackBotToken);
       delete conversationRef.tempMessageTs;
-      storeConversationReference(objectId, conversationRef);
+      await storeConversationReference(storeConfig, objectId, conversationRef).catch((e: any) =>
+        console.warn(`[${requestId}] [STORE] timeline persist after temp-delete failed: ${e?.message || e}`)
+      );
     } catch (e: any) {
       console.warn(`[${requestId}] [TIMELINE] Failed to delete temp message:`, e.message);
     }

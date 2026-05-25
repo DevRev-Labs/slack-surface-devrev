@@ -1,11 +1,13 @@
 import { run } from '../index';
 import * as convStore from '../../../utils/conversation-store';
+import * as sessionStore from '../../../utils/session-store';
 import * as slackClient from '../../../utils/slack-client';
 import * as devrevAuth from '../../../utils/devrev-auth';
 import axios from 'axios';
 import { FunctionInput } from '../../../types';
 
 jest.mock('../../../utils/conversation-store');
+jest.mock('../../../utils/session-store');
 jest.mock('../../../utils/slack-client');
 jest.mock('../../../utils/devrev-auth');
 jest.mock('../../../utils/slack-signature-validator', () => ({
@@ -14,6 +16,7 @@ jest.mock('../../../utils/slack-signature-validator', () => ({
 jest.mock('axios');
 
 const mockedConvStore = convStore as jest.Mocked<typeof convStore>;
+const mockedSessionStore = sessionStore as jest.Mocked<typeof sessionStore>;
 const mockedSlackClient = slackClient as jest.Mocked<typeof slackClient>;
 const mockedDevrevAuth = devrevAuth as jest.Mocked<typeof devrevAuth>;
 const mockedAxios = axios as jest.Mocked<typeof axios>;
@@ -75,6 +78,7 @@ describe('slack_handler', () => {
       timestamp: Date.now(),
     });
     mockedConvStore.generateSessionId.mockReturnValue('slack-C0123456789-1705315800.000100');
+    mockedSessionStore.storeConversationReference.mockResolvedValue(undefined as any);
     mockedSlackClient.sendMessage.mockResolvedValue('1705315801.000200');
     mockedSlackClient.removeBotMention.mockImplementation((text) => text.replace(/<@[A-Z0-9]+>/gi, '').trim());
     mockedSlackClient.getUserEmail.mockResolvedValue('user@example.com');
@@ -222,7 +226,11 @@ describe('slack_handler', () => {
   test('should store temp message ts in conversation reference', async () => {
     await run([mockEvent]);
 
-    expect(mockedConvStore.storeConversationReference).toHaveBeenCalledWith(
+    expect(mockedSessionStore.storeConversationReference).toHaveBeenCalledWith(
+      expect.objectContaining({
+        devrevEndpoint: 'https://api.devrev.ai',
+        serviceAccountToken: 'test-service-token',
+      }),
       'slack-C0123456789-1705315800.000100',
       expect.objectContaining({
         tempMessageTs: '1705315801.000200',

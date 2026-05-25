@@ -15,6 +15,12 @@ service_account:
       - scope: conversation:write
         optional: false
         reason: "Create a DevRev support conversation (sdk.conversationsCreate) and append the user's message as a timeline entry (sdk.timelineEntriesCreate) so the AI Agent has org context for data queries."
+      - scope: tenant_fragment:write
+        optional: false
+        reason: "Activate hook calls /schemas.custom-set with type=TenantFragment to create/update the slack_ai_session custom-leaf-type schema used to persist Slack conversation references."
+      - scope: custom_object:slack_ai_session:all
+        optional: false
+        reason: "Full CRUD on slack_ai_session records — per-thread session objects holding the Slack channel/thread routing metadata needed to deliver AI Agent responses back to Slack."
     impersonate:
       - act_as: all_devusers
         scopes:
@@ -39,6 +45,22 @@ inputs:
       description: "If you have a DevRev email ID which you wish to mock in any surface, then enter it here. If it is a valid email address then it will appear as if the messages are coming from you from any surface such as Slack or Teams. If email address is not present, then this will be ignored."
       ui:
         display_name: Mock Email Address (Testing)
+
+    - name: session_idle_timeout_minutes
+      field_type: int
+      is_required: false
+      default_value: 480
+      description: Minutes of user inactivity before a session is considered idle-expired (default 480 = 8h). Used to populate expires_at_ms on each persisted slack_ai_session record.
+      ui:
+        display_name: Session idle timeout (minutes)
+
+    - name: session_absolute_timeout_hours
+      field_type: int
+      is_required: false
+      default_value: 24
+      description: Absolute lifetime of a session in hours (default 24). Used to populate hard_expires_at_ms — records past this point should be considered safe to garbage-collect.
+      ui:
+        display_name: Session absolute timeout (hours)
 
 keyrings:
   organization:
@@ -149,6 +171,13 @@ functions:
 
   - name: ai_response_handler
     description: Handles async responses from AI Agents and sends them back to Slack.
+
+  - name: ensure_session_state_schema
+    description: Creates or updates the slack_ai_session custom object schema used to persist Slack conversation references.
+
+hooks:
+  - type: activate
+    function: ensure_session_state_schema
 
 automations:
   - name: handle-slack-message

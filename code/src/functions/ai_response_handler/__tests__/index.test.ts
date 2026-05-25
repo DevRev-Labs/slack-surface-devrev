@@ -1,12 +1,12 @@
 import { run } from '../index';
-import * as convStore from '../../../utils/conversation-store';
+import * as sessionStore from '../../../utils/session-store';
 import * as slackClient from '../../../utils/slack-client';
 import { FunctionInput } from '../../../types';
 
-jest.mock('../../../utils/conversation-store');
+jest.mock('../../../utils/session-store');
 jest.mock('../../../utils/slack-client');
 
-const mockedConvStore = convStore as jest.Mocked<typeof convStore>;
+const mockedSessionStore = sessionStore as jest.Mocked<typeof sessionStore>;
 const mockedSlackClient = slackClient as jest.Mocked<typeof slackClient>;
 
 describe('ai_response_handler', () => {
@@ -59,7 +59,8 @@ describe('ai_response_handler', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    mockedConvStore.getConversationReference.mockImplementation(() => getMockConversationRef());
+    mockedSessionStore.getConversationReference.mockImplementation(async () => getMockConversationRef());
+    mockedSessionStore.storeConversationReference.mockResolvedValue(undefined as any);
     mockedSlackClient.sendMessage.mockResolvedValue('new-message-ts');
     mockedSlackClient.updateMessage.mockResolvedValue(undefined);
     mockedSlackClient.deleteMessage.mockResolvedValue(undefined);
@@ -68,7 +69,13 @@ describe('ai_response_handler', () => {
   test('should process AI response and send to Slack', async () => {
     const result = await run([mockEvent]);
 
-    expect(mockedConvStore.getConversationReference).toHaveBeenCalledWith('session-1');
+    expect(mockedSessionStore.getConversationReference).toHaveBeenCalledWith(
+      expect.objectContaining({
+        devrevEndpoint: 'https://api.devrev.ai',
+        serviceAccountToken: 'token-1',
+      }),
+      'session-1'
+    );
     expect(mockedSlackClient.sendMessage).toHaveBeenCalledWith(
       'C0123456789',
       'AI response content',
@@ -99,8 +106,8 @@ describe('ai_response_handler', () => {
 
     // Case: Has temp message, should update it
     const convWithTemp = { ...getMockConversationRef(), tempMessageTs: '1705315801.000200' };
-    mockedConvStore.getConversationReference.mockReturnValue(convWithTemp);
-    
+    mockedSessionStore.getConversationReference.mockResolvedValue(convWithTemp);
+
     await run([progressEvent]);
     expect(mockedSlackClient.updateMessage).toHaveBeenCalledWith(
       'C0123456789',
@@ -154,7 +161,7 @@ describe('ai_response_handler', () => {
 
   test('should delete temp message and send final response', async () => {
     const convWithTemp = { ...getMockConversationRef(), tempMessageTs: '1705315801.000200' };
-    mockedConvStore.getConversationReference.mockReturnValue(convWithTemp);
+    mockedSessionStore.getConversationReference.mockResolvedValue(convWithTemp);
 
     await run([mockEvent]);
 
@@ -188,7 +195,7 @@ describe('ai_response_handler', () => {
   });
 
   test('should handle missing conversation reference', async () => {
-    mockedConvStore.getConversationReference.mockReturnValue(undefined);
+    mockedSessionStore.getConversationReference.mockResolvedValue(undefined);
 
     const result = await run([mockEvent]);
 

@@ -10,9 +10,10 @@ import {
   extractConversationReference,
   generateSessionId,
   ConversationReference,
-  storeConversationReference,
 } from '../../utils/conversation-store';
-import { sendMessage, getUserEmail, removeBotMention } from '../../utils/slack-client';
+import { storeConversationReference, StoreConfig } from '../../utils/session-store';
+import { readSessionTimingConfig } from '../../utils/session-config';
+import { sendMessage, getUserProfile, getChannelName, removeBotMention } from '../../utils/slack-client';
 import { findUserByEmail, getOrCreateActAsToken } from '../../utils/devrev-auth';
 import { validateSlackSignature } from '../../utils/slack-signature-validator';
 
@@ -103,12 +104,38 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
 
   const conversationRef = extractConversationReference(slackEvent);
   const sessionId = generateSessionId(slackEvent);
-  
+
+  if (!conversationRef.channelName && conversationRef.channel) {
+    try {
+      const resolvedChannelName = await getChannelName(conversationRef.channel, config.slackBotToken);
+      if (resolvedChannelName) {
+        conversationRef.channelName = resolvedChannelName;
+        console.log(`[${requestId}] [CHAN] Resolved channel name: ${resolvedChannelName} for ${conversationRef.channel}`);
+      }
+    } catch (chanErr: any) {
+      console.warn(`[${requestId}] [CHAN] Failed to resolve channel name for ${conversationRef.channel}: ${chanErr?.message || chanErr}`);
+    }
+  }
+
   // Determine thread_ts for replies - use existing thread or start a new one
   const threadTs = slackEvent.thread_ts || slackEvent.ts;
 
-  // Store initial conversation reference
-  storeConversationReference(sessionId, conversationRef);
+  const storeConfig: StoreConfig = {
+    devrevEndpoint: config.devrevEndpointInternal,
+    serviceAccountToken: config.serviceAccountToken,
+    timing: readSessionTimingConfig(event.input_data.global_values),
+  };
+
+  // Stamp the bot user id (the recipient of the @mention) onto the ref so it
+  // ends up on the persisted custom object. Slack puts the bot in
+  // event.authorizations[0].user_id for events the bot was authorized for.
+  const botUserId =
+    slackBody?.authorizations?.[0]?.user_id ||
+    slackBody?.api_app_id ||
+    undefined;
+  if (botUserId) {
+    conversationRef.botUserId = botUserId;
+  }
 
   // Verify user is in DevRev org and get act-as token for user-scoped AI execution
   let userToken = config.serviceAccountToken;
@@ -117,11 +144,17 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
   console.log(`[${requestId}] [MSG] Incoming message from Slack user: ${slackEvent.user}, channel: ${conversationRef.channel}, text: "${cleanedMessage.substring(0, 100)}"`);
 
   try {
-    console.log(`[${requestId}] [AUTH] Resolving email for Slack user: ${slackEvent.user}${config.mockEmailAddress ? ' (mock override active)' : ''}`);
-    const userEmail = await resolveUserEmail(slackEvent.user, config.slackBotToken, config.mockEmailAddress);
+    console.log(`[${requestId}] [AUTH] Resolving profile for Slack user: ${slackEvent.user}${config.mockEmailAddress ? ' (mock email override active)' : ''}`);
+    const profile = await resolveUserProfile(slackEvent.user, config.slackBotToken, config.mockEmailAddress);
+    const userEmail = profile.email;
+    if (profile.name) {
+      conversationRef.userName = profile.name;
+      console.log(`[${requestId}] [AUTH] Resolved user name: ${profile.name}`);
+    }
 
     if (userEmail) {
       console.log(`[${requestId}] [AUTH] Resolved user email: ${userEmail}${config.mockEmailAddress ? ' [MOCKED]' : ''}`);
+      conversationRef.userEmail = userEmail;
       const devrevUserId = await findUserByEmail(userEmail, config.devrevEndpointInternal, config.serviceAccountToken);
 
       if (!devrevUserId) {
@@ -136,6 +169,7 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
       }
 
       console.log(`[${requestId}] [AUTH] User verified in DevRev org: ${devrevUserId}, attempting act-as token`);
+      conversationRef.devrevUserId = devrevUserId;
       const actAsToken = await getOrCreateActAsToken(devrevUserId, config.devrevEndpointInternal, config.serviceAccountToken);
       if (actAsToken) {
         userToken = actAsToken;
@@ -152,6 +186,14 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
   }
 
   console.log(`[${requestId}] [AUTH] Token selected: ${tokenType}`);
+
+  // Persist the initial session record now that identity (email / devrev user)
+  // is resolved. Best-effort — failures don't block message delivery.
+  try {
+    await storeConversationReference(storeConfig, sessionId, conversationRef);
+  } catch (storeErr: any) {
+    console.warn(`[${requestId}] [STORE] Initial reference persist failed: ${storeErr?.message || storeErr}`);
+  }
 
   try {
     console.log(`[${requestId}] [SLACK] Sending initial 'Searching...' message to channel: ${conversationRef.channel}, thread: ${threadTs}`);
@@ -176,8 +218,12 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
     const sessionObject = devrevConversationId || sessionId;
     console.log(`[${requestId}] [CONV] session_object: ${sessionObject} (${devrevConversationId ? 'conversation DON' : 'fallback session id'})`);
 
-    storeConversationReference(sessionObject, conversationRef);
-    console.log(`[${requestId}] [STORE] Conversation reference stored for session: ${sessionObject}`);
+    try {
+      await storeConversationReference(storeConfig, sessionObject, conversationRef);
+      console.log(`[${requestId}] [STORE] Conversation reference stored for session: ${sessionObject}`);
+    } catch (storeErr: any) {
+      console.warn(`[${requestId}] [STORE] Persist for sessionObject failed: ${storeErr?.message || storeErr}`);
+    }
 
     console.log(`[${requestId}] [AI] Sending message to agent: agentId=${config.aiAgentId}, sessionObject=${sessionObject}, tokenType=${tokenType}`);
     console.log(`[${requestId}] [AI] Message to agent: "${cleanedMessage.substring(0, 200)}"`);
@@ -232,19 +278,20 @@ function extractConfig(event: FunctionInput): any {
 }
 
 /**
- * Resolve the email address for a Slack user.
- * If mock_email_address is configured (testing), use it instead of real lookup.
- * To revert to real lookup only: remove the mockEmail branch and the mock_email_address input.
+ * Resolve the email + display name for a Slack user.
+ * If mock_email_address is configured (testing), the email is overridden but
+ * the real display name is still fetched from Slack.
  */
-async function resolveUserEmail(
+async function resolveUserProfile(
   slackUserId: string,
   slackBotToken: string,
   mockEmail: string | null
-): Promise<string | null> {
+): Promise<{ email: string | null; name: string | null }> {
+  const profile = await getUserProfile(slackUserId, slackBotToken);
   if (mockEmail) {
-    return mockEmail;
+    return { email: mockEmail, name: profile.name };
   }
-  return getUserEmail(slackUserId, slackBotToken);
+  return profile;
 }
 
 function isValidEmail(email: string): boolean {
