@@ -1,19 +1,25 @@
 /**
- * Slack Signature Validator (header-presence gate).
+ * Slack Signature Validator.
  *
- * Slack normally signs the *raw* HTTP body with HMAC-SHA256 keyed by the
- * signing secret. The DevRev custom webhook layer parses the body to JSON
- * before our function runs, so the exact byte sequence Slack signed is
- * lost — we cannot recompute the HMAC reliably across all payload shapes.
+ * Slack signs the *raw* HTTP body with HMAC-SHA256 keyed by the signing
+ * secret:
  *
- * Instead, we gate on the presence and shape of the two Slack-only
- * headers plus the 5-minute replay window. This is enough to reject
- * forged curl/Postman requests (which won't carry the headers in valid
- * form) while preserving compatibility with every genuine Slack delivery.
+ *   sigBaseString = "v0:" + timestamp + ":" + raw_body
+ *   X-Slack-Signature = "v0=" + hex(HMAC-SHA256(signing_secret, sigBaseString))
  *
- * If DevRev ever exposes the raw body bytes (e.g. input.request.body_raw)
- * we should switch back to a real HMAC check.
+ * The DevRev Rego policy forwards `input.request.body_raw` (base64-encoded
+ * raw bytes) alongside the parsed body and headers, so the function can
+ * recompute the HMAC over the exact bytes Slack signed.
+ *
+ * Behavior:
+ *  - If body_raw + signing_secret are both present, full HMAC verification
+ *    is performed (constant-time compare). This is the production path.
+ *  - If body_raw is absent (older payload shapes / unit-test fixtures), we
+ *    fall back to a header-presence + 5-min replay-window gate. This keeps
+ *    legacy fixtures working while production traffic carries body_raw.
  */
+import { createHmac, timingSafeEqual } from "crypto";
+
 const SLACK_TIMESTAMP_SKEW_SECONDS = 5 * 60;
 const SLACK_SIGNATURE_REGEX = /^v0=[a-f0-9]{64}$/;
 
@@ -35,18 +41,27 @@ function pickHeader(headers: Record<string, any> | undefined, name: string): str
   return undefined;
 }
 
+function constantTimeEqualHex(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  try {
+    return timingSafeEqual(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Validate that an incoming request looks like it came from Slack.
+ * Validate that an incoming request came from Slack by recomputing the
+ * HMAC over the raw body bytes Rego forwarded as `bodyRaw` (base64).
  *
- * Checks: both Slack headers present, signature header matches the
- * v0=<64 hex chars> shape, and the timestamp is within 5 minutes of now.
- * `signingSecret` and `body` are accepted for API stability but are not
- * currently used — see file header for why HMAC isn't viable here.
+ * If `bodyRaw` is not provided or `signingSecret` is missing, falls back
+ * to a header-presence gate (legacy fixtures).
  */
 export function validateSlackSignature(
-  _signingSecret: string | undefined,
+  signingSecret: string | undefined,
   headers: Record<string, any> | undefined,
   _body: unknown,
+  bodyRaw?: string,
 ): SlackSignatureValidationResult {
   try {
     const signature = pickHeader(headers, "x-slack-signature");
@@ -68,6 +83,26 @@ export function validateSlackSignature(
       return { valid: false, reason: "Timestamp outside 5-minute window (replay protection)" };
     }
 
+    if (!bodyRaw || !signingSecret) {
+      return { valid: true };
+    }
+
+    let rawBuf: Buffer;
+    try {
+      rawBuf = Buffer.from(bodyRaw, "base64");
+    } catch {
+      return { valid: false, reason: "body_raw is not valid base64" };
+    }
+
+    const sigBase = Buffer.concat([
+      Buffer.from(`v0:${timestamp}:`, "utf8"),
+      rawBuf,
+    ]);
+    const expected = "v0=" + createHmac("sha256", signingSecret).update(sigBase).digest("hex");
+
+    if (!constantTimeEqualHex(expected, signature)) {
+      return { valid: false, reason: "HMAC signature mismatch" };
+    }
     return { valid: true };
   } catch (err: any) {
     return { valid: false, reason: `Validation error: ${err?.message || "unknown"}` };

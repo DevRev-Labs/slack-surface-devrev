@@ -1,9 +1,15 @@
+import { createHmac } from 'crypto';
 import { validateSlackSignature } from '../slack-signature-validator';
 
 const HEX64 = 'a'.repeat(64);
 
 function nowTs(offsetSec = 0): string {
   return String(Math.floor(Date.now() / 1000) + offsetSec);
+}
+
+function signSlack(secret: string, ts: string, rawBodyUtf8: string): string {
+  const sigBase = `v0:${ts}:${rawBodyUtf8}`;
+  return 'v0=' + createHmac('sha256', secret).update(sigBase).digest('hex');
 }
 
 describe('validateSlackSignature (header-presence gate)', () => {
@@ -75,5 +81,72 @@ describe('validateSlackSignature (header-presence gate)', () => {
       sampleBody,
     );
     expect(result.valid).toBe(true);
+  });
+
+  describe('HMAC verification (when body_raw + signing_secret are provided)', () => {
+    const SECRET = 'test-signing-secret';
+    const RAW = '{"type":"event_callback","event":{"type":"app_mention","text":"hi"}}';
+    const RAW_B64 = Buffer.from(RAW, 'utf8').toString('base64');
+
+    test('accepts a request with a correctly-computed HMAC', () => {
+      const ts = nowTs();
+      const sig = signSlack(SECRET, ts, RAW);
+      const result = validateSlackSignature(
+        SECRET,
+        { 'x-slack-signature': sig, 'x-slack-request-timestamp': ts },
+        sampleBody,
+        RAW_B64,
+      );
+      expect(result.valid).toBe(true);
+    });
+
+    test('rejects a request with the wrong HMAC (forged signature)', () => {
+      const ts = nowTs();
+      const result = validateSlackSignature(
+        SECRET,
+        { 'x-slack-signature': `v0=${HEX64}`, 'x-slack-request-timestamp': ts },
+        sampleBody,
+        RAW_B64,
+      );
+      expect(result.valid).toBe(false);
+      expect(result.reason).toMatch(/HMAC/i);
+    });
+
+    test('rejects when body_raw is tampered after signing', () => {
+      const ts = nowTs();
+      const sig = signSlack(SECRET, ts, RAW);
+      const tamperedRawB64 = Buffer.from(RAW + ' ', 'utf8').toString('base64');
+      const result = validateSlackSignature(
+        SECRET,
+        { 'x-slack-signature': sig, 'x-slack-request-timestamp': ts },
+        sampleBody,
+        tamperedRawB64,
+      );
+      expect(result.valid).toBe(false);
+      expect(result.reason).toMatch(/HMAC/i);
+    });
+
+    test('rejects when signing secret is wrong', () => {
+      const ts = nowTs();
+      const sig = signSlack(SECRET, ts, RAW);
+      const result = validateSlackSignature(
+        'different-secret',
+        { 'x-slack-signature': sig, 'x-slack-request-timestamp': ts },
+        sampleBody,
+        RAW_B64,
+      );
+      expect(result.valid).toBe(false);
+      expect(result.reason).toMatch(/HMAC/i);
+    });
+
+    test('falls back to header-presence gate when body_raw is absent', () => {
+      const result = validateSlackSignature(
+        SECRET,
+        { 'x-slack-signature': `v0=${HEX64}`, 'x-slack-request-timestamp': nowTs() },
+        sampleBody,
+        undefined,
+      );
+      expect(result.valid).toBe(true);
+    });
   });
 });

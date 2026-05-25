@@ -40,9 +40,11 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
       : null;
   const slackBody = wrapped ? wrapped.body : payload;
   const requestHeaders: Record<string, any> | undefined = wrapped ? wrapped.headers : undefined;
+  const bodyRaw: string | undefined =
+    wrapped && typeof (wrapped as any).body_raw === 'string' ? (wrapped as any).body_raw : undefined;
 
   const signingSecret = event.input_data.keyrings?.['slack_signing_secret'];
-  const sigCheck = validateSlackSignature(signingSecret, requestHeaders, slackBody);
+  const sigCheck = validateSlackSignature(signingSecret, requestHeaders, slackBody, bodyRaw);
   if (!sigCheck.valid) {
     console.warn(`[${requestId}] [auth] Slack signature rejected: ${sigCheck.reason}`);
     return FORBIDDEN_RESPONSE;

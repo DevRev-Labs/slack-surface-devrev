@@ -261,12 +261,13 @@ describe('slack_handler', () => {
 
     await run([wrappedEvent]);
 
-    // Validator must be called with the headers map and the inner Slack body —
-    // not the wrapper object — so HMAC computation matches Slack's input.
+    // Validator must be called with the headers map, the inner Slack body,
+    // and (when present) body_raw — so HMAC computation matches Slack's input.
     expect(validator.validateSlackSignature).toHaveBeenCalledWith(
       'test-signing-secret',
       expect.objectContaining({ 'x-slack-signature': expect.any(String) }),
       expect.objectContaining({ type: 'event_callback' }),
+      undefined,
     );
     // The handler must reach event-type handling (i.e. it unwrapped body.event).
     expect(mockedSlackClient.removeBotMention).toHaveBeenCalled();

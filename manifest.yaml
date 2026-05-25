@@ -77,9 +77,11 @@ event_sources:
             }
           }
 
-          # Forward POST bodies + headers to the function. Signature
-          # verification (X-Slack-Signature HMAC) happens in
-          # slack_handler — see code/src/utils/slack-signature-validator.ts.
+          # Forward POST bodies + headers + body_raw to the function.
+          # body_raw is base64-encoded raw request bytes — required for the
+          # function to recompute Slack's HMAC (HMAC-SHA256 over the exact
+          # bytes Slack signed). HMAC verification happens in slack_handler
+          # — see code/src/utils/slack-signature-validator.ts.
           # We must not gate on header presence in Rego: missing signatures
           # must reach the function so it can return a clean 403.
           output = {"event": event, "event_key": event_key} if {
@@ -87,6 +89,7 @@ event_sources:
             input.request.body.type == "event_callback"
             event := {
               "body": input.request.body,
+              "body_raw": input.request.body_raw,
               "headers": input.request.headers
             }
             event_key := "slack-message"
