@@ -30,9 +30,31 @@ interface SlackUserResponse {
     profile?: {
       email?: string;
       display_name?: string;
+      real_name?: string;
     };
   };
   error?: string;
+}
+
+/**
+ * Response from Slack API conversations.info method.
+ */
+interface SlackConversationResponse {
+  ok: boolean;
+  channel?: {
+    id: string;
+    name?: string;
+    is_im?: boolean;
+    is_mpim?: boolean;
+    is_channel?: boolean;
+    is_group?: boolean;
+  };
+  error?: string;
+}
+
+export interface SlackUserProfile {
+  email: string | null;
+  name: string | null;
 }
 
 /**
@@ -162,7 +184,7 @@ export async function deleteMessage(
 
 /**
  * Get user information from Slack, including their email address.
- * 
+ *
  * @param userId The Slack user ID.
  * @param botToken The Slack bot token.
  * @returns The user's email address, or null if not found.
@@ -171,25 +193,74 @@ export async function getUserEmail(
   userId: string,
   botToken: string
 ): Promise<string | null> {
+  return (await getUserProfile(userId, botToken)).email;
+}
+
+/**
+ * Get the Slack user's profile (email + display name) in a single users.info call.
+ * Returns nulls for fields that aren't available rather than throwing.
+ */
+export async function getUserProfile(
+  userId: string,
+  botToken: string
+): Promise<SlackUserProfile> {
   try {
     const response = await axios.get<SlackUserResponse>(
       `${SLACK_API_BASE}/users.info`,
       {
         params: { user: userId },
-        headers: {
-          'Authorization': `Bearer ${botToken}`,
-        },
+        headers: { 'Authorization': `Bearer ${botToken}` },
       }
     );
 
     if (!response.data.ok) {
       console.error(`Slack users.info error: ${response.data.error}`);
+      return { email: null, name: null };
+    }
+
+    const user = response.data.user;
+    const name =
+      user?.profile?.display_name ||
+      user?.profile?.real_name ||
+      user?.real_name ||
+      user?.name ||
+      null;
+    return {
+      email: user?.profile?.email || null,
+      name: name && name.trim() ? name.trim() : null,
+    };
+  } catch (error: any) {
+    console.error('Slack getUserProfile error:', error.response?.data || error.message);
+    return { email: null, name: null };
+  }
+}
+
+/**
+ * Resolve a Slack channel/conversation's human-readable name via conversations.info.
+ * Returns null for DMs (no `name`) or on error.
+ */
+export async function getChannelName(
+  channelId: string,
+  botToken: string
+): Promise<string | null> {
+  if (!channelId) return null;
+  try {
+    const response = await axios.get<SlackConversationResponse>(
+      `${SLACK_API_BASE}/conversations.info`,
+      {
+        params: { channel: channelId },
+        headers: { 'Authorization': `Bearer ${botToken}` },
+      }
+    );
+
+    if (!response.data.ok) {
+      console.warn(`Slack conversations.info error for ${channelId}: ${response.data.error}`);
       return null;
     }
 
-    return response.data.user?.profile?.email || null;
+    return response.data.channel?.name || null;
   } catch (error: any) {
-    console.error('Slack getUserEmail error:', error.response?.data || error.message);
+    console.warn('Slack getChannelName error:', error.response?.data || error.message);
     return null;
   }
 }
