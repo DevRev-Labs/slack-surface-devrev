@@ -16,6 +16,7 @@ const TNT = 'tnt__';
 export const SESSION_FIELD = {
   // Identity
   sessionId: `${TNT}session_id`,
+  conversationKey: `${TNT}conversation_key`,
   channel: `${TNT}channel`,
   channelName: `${TNT}channel_name`,
   conversationType: `${TNT}conversation_type`,
@@ -29,6 +30,7 @@ export const SESSION_FIELD = {
   // Bot / DevRev linkage
   botUserId: `${TNT}bot_user_id`,
   devrevUserId: `${TNT}devrev_user_id`,
+  devrevConversationId: `${TNT}devrev_conversation_id`,
   // Routing helpers
   tempMessageTs: `${TNT}temp_message_ts`,
   // Lifecycle
@@ -58,6 +60,7 @@ interface FieldSpec {
 export const SESSION_FIELD_SPECS: FieldSpec[] = [
   // Identity
   { name: stripTnt(SESSION_FIELD.sessionId), field_type: 'text', is_required: true, is_immutable: true, is_filterable: true },
+  { name: stripTnt(SESSION_FIELD.conversationKey), field_type: 'text', is_filterable: true },
   { name: stripTnt(SESSION_FIELD.channel), field_type: 'text', is_required: true, is_filterable: true },
   { name: stripTnt(SESSION_FIELD.channelName), field_type: 'text' },
   { name: stripTnt(SESSION_FIELD.conversationType), field_type: 'text' },
@@ -71,6 +74,7 @@ export const SESSION_FIELD_SPECS: FieldSpec[] = [
   // Bot / DevRev linkage
   { name: stripTnt(SESSION_FIELD.botUserId), field_type: 'text' },
   { name: stripTnt(SESSION_FIELD.devrevUserId), field_type: 'text' },
+  { name: stripTnt(SESSION_FIELD.devrevConversationId), field_type: 'text', is_filterable: true },
   // Routing helpers
   { name: stripTnt(SESSION_FIELD.tempMessageTs), field_type: 'text' },
   // Lifecycle
