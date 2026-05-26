@@ -1,27 +1,107 @@
 /**
  * AI Response Handler Function
- * 
+ *
  * Handles async responses from DevRev AI Agents and sends them back to Slack.
  */
 
 import { FunctionInput } from '../../types';
 import { ConversationReference } from '../../utils/conversation-store';
 import {
-  getConversationReference,
-  storeConversationReference,
+  getSessionById,
+  getSessionByDevrevConversationId,
+  patchSession,
+  recordToConversationReference,
+  SessionRecord,
   StoreConfig,
 } from '../../utils/session-store';
 import { readSessionTimingConfig } from '../../utils/session-config';
 import { sendMessage, updateMessage, deleteMessage } from '../../utils/slack-client';
 
+interface ResolvedSession {
+  record: SessionRecord;
+  ref: ConversationReference;
+}
+
+/**
+ * Resolve the SessionRecord (and its corresponding ConversationReference) for
+ * an inbound AI Agent response. Lookup priority:
+ *   1. client_metadata.session_id (our UUID) → getSessionById
+ *   2. payload.session_object — try as UUID, then as DevRev conversation DON
+ */
+async function resolveSessionFromResponse(
+  storeConfig: StoreConfig,
+  payload: any,
+  requestId: string
+): Promise<ResolvedSession | null> {
+  const clientMetadata = payload.client_metadata || payload.ai_agent_response?.client_metadata || {};
+  const candidates: { value: string; source: string }[] = [];
+  if (clientMetadata.session_id) {
+    candidates.push({ value: String(clientMetadata.session_id), source: 'client_metadata.session_id' });
+  }
+  const sessionObject = payload.session_object || payload.ai_agent_response?.session_object;
+  if (sessionObject) {
+    candidates.push({ value: String(sessionObject), source: 'payload.session_object' });
+  }
+
+  for (const { value, source } of candidates) {
+    try {
+      const byId = await getSessionById(storeConfig, value);
+      if (byId) {
+        console.log(`[${requestId}] [STORE] Session resolved by id via ${source}: ${byId.sessionId}`);
+        return { record: byId, ref: recordToConversationReference(byId) };
+      }
+    } catch (err: any) {
+      console.warn(`[${requestId}] [STORE] getSessionById(${source}) failed: ${err?.message || err}`);
+    }
+
+    if (typeof value === 'string' && value.includes(':conversation/')) {
+      try {
+        const byConv = await getSessionByDevrevConversationId(storeConfig, value);
+        if (byConv) {
+          console.log(`[${requestId}] [STORE] Session resolved by conversation DON via ${source}: ${byConv.sessionId}`);
+          return { record: byConv, ref: recordToConversationReference(byConv) };
+        }
+      } catch (err: any) {
+        console.warn(`[${requestId}] [STORE] getSessionByDevrevConversationId(${source}) failed: ${err?.message || err}`);
+      }
+    }
+  }
+
+  // Fallback: client_metadata.conversation_reference (legacy in-flight payloads).
+  const fromMetadata = clientMetadata.conversation_reference;
+  if (fromMetadata && typeof fromMetadata === 'object') {
+    const meta = fromMetadata as any;
+    const ref: ConversationReference = {
+      ...(meta as ConversationReference),
+      timestamp: meta.timestamp ?? Date.now(),
+      tempMessageTs: meta.tempMessageTs || meta.temp_message_ts || undefined,
+      threadTs: meta.threadTs || meta.thread_ts || undefined,
+    };
+    console.log(`[${requestId}] [STORE] Falling back to client_metadata.conversation_reference (no SessionRecord)`);
+    return { record: null as unknown as SessionRecord, ref };
+  }
+
+  return null;
+}
+
+async function safePatch(
+  storeConfig: StoreConfig,
+  record: SessionRecord | null,
+  patch: Parameters<typeof patchSession>[2],
+  requestId: string,
+  context: string
+): Promise<SessionRecord | null> {
+  if (!record) return null;
+  try {
+    return await patchSession(storeConfig, record, patch);
+  } catch (err: any) {
+    console.warn(`[${requestId}] [STORE] patchSession failed (${context}): ${err?.message || err}`);
+    return record;
+  }
+}
+
 /**
  * Main handler for AI Agent responses.
- * 
- * Purpose: Processes asynchronous responses from DevRev AI Agents and forwards them back to the original Slack conversation.
- * Input Definitions:
- *  - event: The function input containing the AI response payload, execution metadata, and global configuration.
- * Output Definitions:
- *  - Promise<any>: A status object indicating success or failure of the message delivery.
  */
 async function handleAIResponse(event: FunctionInput): Promise<any> {
   const { payload, execution_metadata, input_data, context } = event;
@@ -41,52 +121,20 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
   console.log(`[${requestId}] [AI_RESP] Raw payload keys: ${Object.keys(payload).join(', ')}`);
 
   const clientMetadata = payload.client_metadata || payload.ai_agent_response?.client_metadata || {};
-  const sessionId = clientMetadata.session_id || payload.session_object || payload.ai_agent_response?.session_object;
-
-  console.log(`[${requestId}] [AI_RESP] session_id resolved: ${sessionId}`);
   console.log(`[${requestId}] [AI_RESP] client_metadata keys: ${Object.keys(clientMetadata).join(', ')}`);
 
-  if (!sessionId) {
-    console.error(`[${requestId}] [AI_RESP] No session ID in AI response. Full payload: ${JSON.stringify(payload)}`);
-    return { status: 'error', reason: 'No session ID in response' };
-  }
-
-  let conversationRef: ConversationReference | undefined;
-  try {
-    conversationRef = await getConversationReference(storeConfig, sessionId);
-  } catch (lookupErr: any) {
-    console.warn(`[${requestId}] [STORE] Lookup failed: ${lookupErr?.message || lookupErr}`);
-  }
-  console.log(`[${requestId}] [STORE] Conversation ref from custom-object store: ${conversationRef ? 'FOUND' : 'NOT FOUND'}`);
-
-  if (!conversationRef) {
-    const fromMetadata = clientMetadata.conversation_reference;
-    console.log(`[${requestId}] [STORE] Trying to recover from client_metadata.conversation_reference: ${fromMetadata ? 'FOUND' : 'NOT FOUND'}`);
-    if (fromMetadata && typeof fromMetadata === 'object') {
-      const meta = fromMetadata as any;
-      conversationRef = {
-        ...(meta as ConversationReference),
-        timestamp: meta.timestamp ?? Date.now(),
-        tempMessageTs: meta.tempMessageTs || meta.temp_message_ts || undefined,
-        threadTs: meta.threadTs || meta.thread_ts || undefined,
-      };
-      try {
-        await storeConversationReference(storeConfig, sessionId, conversationRef);
-      } catch (persistErr: any) {
-        console.warn(`[${requestId}] [STORE] Persist after recovery failed: ${persistErr?.message || persistErr}`);
-      }
-      console.log(`[${requestId}] [STORE] Recovered conversation ref from metadata, channel: ${conversationRef.channel}, tempMsgTs: ${conversationRef.tempMessageTs ?? 'none'}, threadTs: ${conversationRef.threadTs ?? 'none'}`);
-    }
-  }
-
-  if (!conversationRef) {
-    console.error(`[${requestId}] [STORE] FATAL: No conversation reference found for session: ${sessionId}. client_metadata: ${JSON.stringify(clientMetadata)}`);
+  const resolved = await resolveSessionFromResponse(storeConfig, payload, requestId);
+  if (!resolved) {
+    console.error(`[${requestId}] [STORE] FATAL: No session reference found. client_metadata: ${JSON.stringify(clientMetadata)}`);
     return { status: 'error', reason: 'Conversation reference not found' };
   }
 
-  console.log(`[${requestId}] [AI_RESP] Conversation ref resolved — channel: ${conversationRef.channel}, user: ${conversationRef.userId}, tempMsgTs: ${conversationRef.tempMessageTs ?? 'none'}`);
+  let sessionRecord: SessionRecord | null = resolved.record || null;
+  let conversationRef: ConversationReference = resolved.ref;
+  const sessionId = sessionRecord?.sessionId || clientMetadata.session_id || payload.session_object || 'unknown';
 
-  // Get Slack bot token from client_metadata or keyrings
+  console.log(`[${requestId}] [AI_RESP] Session resolved — sessionId: ${sessionId}, channel: ${conversationRef.channel}, user: ${conversationRef.userId}, tempMsgTs: ${conversationRef.tempMessageTs ?? 'none'}`);
+
   const slackBotToken = clientMetadata.slack_bot_token || input_data.keyrings['slack_bot_token'];
 
   if (!slackBotToken) {
@@ -103,13 +151,13 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
     return { status: 'ignored', reason: 'Suggestions event' };
   }
 
-  // Handle progress events - update the temp message
+  // Handle progress events — update the temp message
   if (agentResponseType === 'progress') {
     const progress = payload.ai_agent_response?.progress || payload.progress;
     console.log(`[${requestId}] [AI_RESP] progress state: ${progress?.progress_state}, keys: ${Object.keys(progress || {}).join(', ')}`);
     if (progress) {
       const progressMessage = getProgressMessage(progress);
-      
+
       try {
         if (conversationRef.tempMessageTs) {
           try {
@@ -122,7 +170,6 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
           } catch (updateErr: any) {
             // Stale tempMessageTs (e.g. message_not_found) — send a new one
             console.warn(`[${requestId}] [AI_RESP] updateMessage failed (${updateErr.message}), sending new progress message`);
-            delete conversationRef.tempMessageTs;
             const ts = await sendMessage(
               conversationRef.channel,
               progressMessage,
@@ -130,9 +177,7 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
               conversationRef.threadTs
             );
             conversationRef.tempMessageTs = ts;
-            await storeConversationReference(storeConfig, sessionId, conversationRef).catch((e: any) =>
-              console.warn(`[${requestId}] [STORE] persist after progress retry failed: ${e?.message || e}`)
-            );
+            sessionRecord = await safePatch(storeConfig, sessionRecord, { tempMessageTs: ts }, requestId, 'progress retry');
           }
         } else {
           const ts = await sendMessage(
@@ -142,9 +187,7 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
             conversationRef.threadTs
           );
           conversationRef.tempMessageTs = ts;
-          await storeConversationReference(storeConfig, sessionId, conversationRef).catch((e: any) =>
-            console.warn(`[${requestId}] [STORE] persist after progress send failed: ${e?.message || e}`)
-          );
+          sessionRecord = await safePatch(storeConfig, sessionRecord, { tempMessageTs: ts }, requestId, 'progress send');
         }
         return { status: 'success', message: 'Progress update sent to Slack' };
       } catch (error: any) {
@@ -158,15 +201,12 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
   if (agentResponseType === 'error') {
     const errorMsg = payload.ai_agent_response?.error?.error || payload.error?.error || 'Unknown AI error';
     try {
-      // Delete temp message and send error as new message
       if (conversationRef.tempMessageTs) {
         await deleteMessage(conversationRef.channel, conversationRef.tempMessageTs, slackBotToken);
-        delete conversationRef.tempMessageTs;
-        await storeConversationReference(storeConfig, sessionId, conversationRef).catch((e: any) =>
-          console.warn(`[${requestId}] [STORE] persist after error-temp-delete failed: ${e?.message || e}`)
-        );
+        conversationRef.tempMessageTs = undefined;
+        sessionRecord = await safePatch(storeConfig, sessionRecord, { tempMessageTs: null }, requestId, 'error temp delete');
       }
-      
+
       await sendMessage(
         conversationRef.channel,
         `❌ Error: ${errorMsg}`,
@@ -180,9 +220,9 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
     }
   }
 
-  // Handle final message - delete temp message and send final response
+  // Handle final message — delete temp message and send final response
   console.log(`[${requestId}] [AI_RESP] Extracting final response text from payload`);
-  console.log(`[${requestId}] [AI_RESP] full payload: ${JSON.stringify(payload.ai_agent_response).substring(0, 500)}`);
+  console.log(`[${requestId}] [AI_RESP] full payload: ${JSON.stringify(payload.ai_agent_response ?? null).substring(0, 500)}`);
   const responseText = extractResponseText(payload);
 
   if (!responseText) {
@@ -194,20 +234,16 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
   const threadTs = conversationRef.threadTs || conversationRef.messageTs;
   console.log(`[${requestId}] [AI_RESP] Sending final response, channel: ${conversationRef.channel}, threadTs: ${threadTs ?? 'none'}, tempMsgTs: ${conversationRef.tempMessageTs ?? 'none'}`);
 
-  // Delete the temporary "Searching..." message
   if (conversationRef.tempMessageTs) {
     try {
       await deleteMessage(conversationRef.channel, conversationRef.tempMessageTs, slackBotToken);
-      delete conversationRef.tempMessageTs;
-      await storeConversationReference(storeConfig, sessionId, conversationRef).catch((e: any) =>
-        console.warn(`[${requestId}] [STORE] persist after temp-delete failed: ${e?.message || e}`)
-      );
+      conversationRef.tempMessageTs = undefined;
+      sessionRecord = await safePatch(storeConfig, sessionRecord, { tempMessageTs: null }, requestId, 'final temp delete');
     } catch (deleteErr: any) {
       console.warn(`[${requestId}] [AI_RESP] Failed to delete temp message (continuing):`, deleteErr.message);
     }
   }
 
-  // Send the final response
   try {
     const formattedResponse = formatForSlack(responseText);
     console.log(`[${requestId}] [AI_RESP] Response from agent: "${responseText.substring(0, 200)}${responseText.length > 200 ? '...' : ''}"`);
@@ -241,29 +277,27 @@ async function handleTimelineEntry(event: FunctionInput, storeConfig: StoreConfi
     return { status: 'ignored', reason: 'No timeline entry in payload' };
   }
 
-  // Only forward external-visibility comments
   if (entry.visibility !== 'external' && entry.visibility !== 'public') {
     console.log(`[${requestId}] [TIMELINE] Skipping non-external entry, visibility: ${entry.visibility}`);
     return { status: 'ignored', reason: 'Non-external timeline entry' };
   }
 
-  // Skip entries not on a conversation
   const objectId: string | undefined = entry.object?.id ?? entry.object;
   if (!objectId || !objectId.includes(':conversation/')) {
     return { status: 'ignored', reason: 'Not a conversation timeline entry' };
   }
 
-  // Look up conversation reference by conversation DON
-  let conversationRef: ConversationReference | undefined;
+  let sessionRecord: SessionRecord | null = null;
   try {
-    conversationRef = await getConversationReference(storeConfig, objectId);
+    sessionRecord = await getSessionByDevrevConversationId(storeConfig, objectId);
   } catch (lookupErr: any) {
     console.warn(`[${requestId}] [TIMELINE] Lookup failed: ${lookupErr?.message || lookupErr}`);
   }
-  if (!conversationRef) {
-    console.log(`[${requestId}] [TIMELINE] No conversation ref for ${objectId}, ignoring`);
-    return { status: 'ignored', reason: 'No conversation reference found for conversation' };
+  if (!sessionRecord) {
+    console.log(`[${requestId}] [TIMELINE] No session record for ${objectId}, ignoring`);
+    return { status: 'ignored', reason: 'No session reference found for conversation' };
   }
+  const conversationRef = recordToConversationReference(sessionRecord);
 
   const body: string = entry.text || entry.body || '';
   if (!body.trim()) {
@@ -285,14 +319,11 @@ async function handleTimelineEntry(event: FunctionInput, storeConfig: StoreConfi
 
   const threadTs = conversationRef.threadTs || conversationRef.messageTs;
 
-  // Delete temp "Searching..." message if present
   if (conversationRef.tempMessageTs) {
     try {
       await deleteMessage(conversationRef.channel, conversationRef.tempMessageTs, slackBotToken);
-      delete conversationRef.tempMessageTs;
-      await storeConversationReference(storeConfig, objectId, conversationRef).catch((e: any) =>
-        console.warn(`[${requestId}] [STORE] timeline persist after temp-delete failed: ${e?.message || e}`)
-      );
+      conversationRef.tempMessageTs = undefined;
+      sessionRecord = await safePatch(storeConfig, sessionRecord, { tempMessageTs: null }, requestId, 'timeline temp delete');
     } catch (e: any) {
       console.warn(`[${requestId}] [TIMELINE] Failed to delete temp message:`, e.message);
     }
@@ -351,10 +382,6 @@ function formatForSlack(text: string): string {
 
 /**
  * Convert a markdown table into a numbered list for Slack.
- * Input:  | # | Name | Email |
- *         |---|------|-------|
- *         | 1 | Alice | alice@x.com |
- * Output: 1. *Alice* — alice@x.com
  */
 function convertTableToText(text: string): string {
   const lines = text.split('\n');
@@ -372,24 +399,20 @@ function convertTableToText(text: string): string {
 
     const cells = trimmed.split('|').map(c => c.trim()).filter(c => c.length > 0);
 
-    // Separator row (---|---|---)
     if (cells.every(c => /^[-:]+$/.test(c))) {
       inTable = true;
       continue;
     }
 
     if (!inTable) {
-      // This is the header row
       headers = cells;
       inTable = true;
       continue;
     }
 
-    // Data row — format as "Field: Value, Field: Value"
     if (headers.length > 0) {
       const parts = cells.map((cell, i) => {
         const header = headers[i] || '';
-        // Skip index/number columns (#, No, Index)
         if (/^#$|^no\.?$|^index$/i.test(header)) return null;
         if (!cell || cell === '-') return null;
         return header ? `${header}: ${cell}` : cell;
@@ -405,21 +428,20 @@ function convertTableToText(text: string): string {
 
 /**
  * Generate a progress message from an AI Agent progress object.
- * Uses Slack mrkdwn formatting.
  */
 function getProgressMessage(progress: any): string {
   if (!progress) return '⏳ _Working..._';
-  
+
   const state = progress.progress_state;
   const skillTriggered = progress.skill_triggered;
   const skillExecuted = progress.skill_executed;
   const skill = skillTriggered?.skill_name || skillExecuted?.skill_name;
-  
+
   const thought = skillTriggered?.thought || skillExecuted?.thought || progress.thought;
   const skillInput = skillTriggered?.skill_input || skillExecuted?.skill_input;
-  
+
   let message = '';
-  
+
   switch (state) {
     case 'skill_triggered':
       message = `🔍 *Analyzing: ${formatSkillName(skill) || 'data'}*`;
@@ -433,7 +455,7 @@ function getProgressMessage(progress: any): string {
         }
       }
       break;
-      
+
     case 'skill_executed':
       message = `⚡ *Processing: ${formatSkillName(skill) || 'results'}*`;
       const resultSummary = skillExecuted?.result_summary || skillExecuted?.skill_output_summary;
@@ -441,7 +463,7 @@ function getProgressMessage(progress: any): string {
         message += `\n> _${truncateText(resultSummary, 150)}_`;
       }
       break;
-      
+
     case 'thinking':
     case 'reasoning':
       message = `🤔 *Thinking...*`;
@@ -449,24 +471,21 @@ function getProgressMessage(progress: any): string {
         message += `\n> _${truncateText(thought, 250)}_`;
       }
       break;
-      
+
     case 'evaluating':
       message = `📝 *Preparing response...*`;
       break;
-      
+
     default:
       message = `⏳ _Processing request..._`;
       if (thought) {
         message += `\n> _${truncateText(thought, 200)}_`;
       }
   }
-  
+
   return message;
 }
 
-/**
- * Format skill name to be more readable.
- */
 function formatSkillName(skillName: string | undefined): string {
   if (!skillName) return '';
   return skillName
@@ -476,9 +495,6 @@ function formatSkillName(skillName: string | undefined): string {
     .join(' ');
 }
 
-/**
- * Truncate text to a maximum length, adding ellipsis if truncated.
- */
 function truncateText(text: string, maxLength: number): string {
   if (!text) return '';
   const cleaned = text.replace(/\n/g, ' ').trim();
@@ -486,12 +502,9 @@ function truncateText(text: string, maxLength: number): string {
   return cleaned.substring(0, maxLength - 3) + '...';
 }
 
-/**
- * Format skill input for display (show key parameters).
- */
 function formatSkillInput(input: any): string {
   if (!input) return '';
-  
+
   if (input.query) {
     return `Query: ${truncateText(input.query, 100)}`;
   }
@@ -504,16 +517,16 @@ function formatSkillInput(input: any): string {
   if (input.question) {
     return `Question: ${truncateText(input.question, 100)}`;
   }
-  
+
   const keys = Object.keys(input);
   if (keys.length > 0) {
     const firstKey = keys[0];
-    const value = typeof input[firstKey] === 'string' 
+    const value = typeof input[firstKey] === 'string'
       ? truncateText(input[firstKey], 80)
       : JSON.stringify(input[firstKey]).substring(0, 80);
     return `${firstKey}: ${value}`;
   }
-  
+
   return '';
 }
 
@@ -552,7 +565,7 @@ function extractResponseText(payload: any): string | null {
 }
 
 /**
- * Exported run function - entry point for the snap-in function.
+ * Exported run function — entry point for the snap-in function.
  */
 export const run = async (events: FunctionInput[]): Promise<any> => {
   const results = await Promise.all(
@@ -568,7 +581,7 @@ export const run = async (events: FunctionInput[]): Promise<any> => {
       }
     })
   );
-  
+
   return results.length === 1 ? results[0] : results;
 };
 
