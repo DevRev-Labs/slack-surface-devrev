@@ -56,3 +56,38 @@ export function generateSessionId(event: any): string {
   const channel = event.channel || '';
   return `slack-${channel}-${threadIdentifier}`.substring(0, 64);
 }
+
+/**
+ * Routing key parts for a Slack event. Used by session-store to derive a
+ * stable conversation_key (sha256 hash of channel::threadTs::userId) so that
+ * a (channel, thread, user) tuple maps to at most one active session.
+ *
+ * Channel-type-aware so each surface gets the right session granularity:
+ *
+ *   im (1:1 DM):
+ *     One persistent session per (channel, user). Slack DMs have no "new chat"
+ *     affordance — the same DM channel lives forever — so every top-level DM
+ *     message and every in-thread reply collapses onto the same session.
+ *     The user can still rotate explicitly via `/clear` or "new session".
+ *
+ *   channel / mpim (group DM):
+ *     Per-thread sessions. A new top-level post starts a new session
+ *     (threadTs = event.ts, which becomes the thread root for any replies).
+ *     A reply inside an existing thread reuses that thread's session
+ *     (threadTs = event.thread_ts).
+ */
+export function extractRoutingKeyParts(event: any): {
+  channel: string;
+  threadTs: string;
+  userId: string;
+} {
+  const channel = event.channel || '';
+  const userId = event.user || '';
+  const channelType = (event.channel_type || '').toLowerCase();
+
+  if (channelType === 'im') {
+    return { channel, threadTs: 'dm', userId };
+  }
+
+  return { channel, threadTs: event.thread_ts || event.ts || '', userId };
+}

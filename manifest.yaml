@@ -165,6 +165,15 @@ event_sources:
           - ai_agent_response
           - timeline_entry_created
 
+    - name: session-gc-timer
+      description: Cron-driven periodic sweeper for slack_ai_session records.
+      display_name: Session GC Timer
+      type: timer-events
+      config:
+        cron: "*/30 * * * *"
+        metadata:
+          event_key: session-gc-tick
+
 functions:
   - name: slack_handler
     description: Handles incoming messages from Slack and forwards them to AI Agents.
@@ -174,6 +183,9 @@ functions:
 
   - name: ensure_session_state_schema
     description: Creates or updates the slack_ai_session custom object schema used to persist Slack conversation references.
+
+  - name: session_gc
+    description: Periodic sweeper. Marks idle-expired sessions and deletes records past the absolute timeout.
 
 hooks:
   - type: activate
@@ -194,3 +206,10 @@ automations:
       - ai_agent_response
       - timeline_entry_created
     function: ai_response_handler
+
+  - name: run-session-gc
+    description: Run periodic session garbage collection
+    source: session-gc-timer
+    event_types:
+      - timer.tick
+    function: session_gc

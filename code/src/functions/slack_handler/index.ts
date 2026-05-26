@@ -1,6 +1,6 @@
 /**
  * Slack Handler Function
- * 
+ *
  * Handles incoming messages from Slack and forwards them to DevRev AI Agents.
  */
 
@@ -8,25 +8,93 @@ import { betaSDK, client } from '@devrev/typescript-sdk';
 import { FunctionInput } from '../../types';
 import {
   extractConversationReference,
-  generateSessionId,
+  extractRoutingKeyParts,
   ConversationReference,
 } from '../../utils/conversation-store';
-import { storeConversationReference, StoreConfig } from '../../utils/session-store';
-import { readSessionTimingConfig } from '../../utils/session-config';
+import {
+  buildConversationKey,
+  createSession,
+  getActiveSession,
+  isSessionExpired,
+  rotateSession,
+  touchSession,
+  StoreConfig,
+  SessionRecord,
+  SessionIdentity,
+  SessionUserOverrides,
+} from '../../utils/session-store';
+import { readSessionTimingConfig, SessionTimingConfig } from '../../utils/session-config';
 import { sendMessage, getUserProfile, getChannelName, removeBotMention } from '../../utils/slack-client';
 import { findUserByEmail, getOrCreateActAsToken } from '../../utils/devrev-auth';
 import { validateSlackSignature } from '../../utils/slack-signature-validator';
 
 const FORBIDDEN_RESPONSE = { status: 'forbidden', status_code: 403 };
 
+const RESET_INTENT_PHRASES = new Set(['new session', '/clear']);
+
+/**
+ * Find or create the right session for this Slack message.
+ *
+ * - reset intent → rotate existing (or create) with reason `user_reset`.
+ * - normal flow → reuse active, rotate on idle/absolute expiry, else create.
+ *
+ * `requireExistingSession=true` (used for unmentioned thread replies) skips
+ * session creation when no active row is found — the caller treats that as
+ * "ignore this message".
+ */
+async function resolveSession(
+  storeConfig: StoreConfig,
+  timing: SessionTimingConfig,
+  identity: SessionIdentity,
+  userOverrides: SessionUserOverrides,
+  intent: 'message' | 'reset',
+  requestId: string,
+  requireExistingSession = false
+): Promise<SessionRecord | null> {
+  const existing = await getActiveSession(storeConfig, identity.conversationKey);
+
+  if (intent === 'reset') {
+    if (existing) {
+      const rotated = await rotateSession(storeConfig, existing, 'user_reset', identity, timing, userOverrides);
+      console.log(`[${requestId}] [session] rotated user_reset old=${existing.sessionId} new=${rotated.sessionId}`);
+      return rotated;
+    }
+    const fresh = await createSession(storeConfig, { identity, ...userOverrides }, timing);
+    console.log(`[${requestId}] [session] created (after reset, no prior) ${fresh.sessionId}`);
+    return fresh;
+  }
+
+  if (!existing) {
+    if (requireExistingSession) {
+      console.log(`[${requestId}] [session] no active session for thread reply — ignoring`);
+      return null;
+    }
+    const fresh = await createSession(storeConfig, { identity, ...userOverrides }, timing);
+    console.log(`[${requestId}] [session] created ${fresh.sessionId} gen=${fresh.generation}`);
+    return fresh;
+  }
+
+  const expiredReason = isSessionExpired(existing);
+  if (expiredReason) {
+    if (requireExistingSession) {
+      console.log(`[${requestId}] [session] active session expired (${expiredReason}) for thread reply — ignoring`);
+      return null;
+    }
+    const rotated = await rotateSession(storeConfig, existing, expiredReason, identity, timing, userOverrides);
+    console.log(
+      `[${requestId}] [session] rotated reason=${expiredReason} old=${existing.sessionId} new=${rotated.sessionId} gen=${rotated.generation}`
+    );
+    return rotated;
+  }
+
+  console.log(`[${requestId}] [session] reused ${existing.sessionId} gen=${existing.generation} msgs=${existing.messageCount}`);
+  return existing;
+}
+
 /**
  * Main handler for Slack messages.
- * 
- * Purpose: Processes incoming messages from Slack, stores conversation context, and invokes the AI Agent.
- * Input Definitions:
- *  - event: The function input containing the Slack event payload, execution metadata, and global configuration.
- * Output Definitions:
- *  - Promise<any>: A status object indicating success or failure of the message processing.
+ *
+ * Purpose: Processes incoming messages from Slack, manages session lifecycle, and invokes the AI Agent.
  */
 async function handleSlackMessage(event: FunctionInput): Promise<any> {
   const payload = event.payload;
@@ -51,22 +119,29 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
     return FORBIDDEN_RESPONSE;
   }
 
-  // Extract the Slack event from the event_callback payload
   const slackEvent = slackBody?.event;
 
   if (!slackEvent) {
     return { status: 'ignored', reason: 'No event in payload' };
   }
 
-  // Only handle app_mention and message events
   if (slackEvent.type !== 'app_mention' && slackEvent.type !== 'message') {
     return { status: 'ignored', reason: `Unsupported event type: ${slackEvent.type}` };
   }
 
-  // Skip bot messages to avoid loops
   if (slackEvent.bot_id || slackEvent.subtype === 'bot_message') {
     return { status: 'ignored', reason: 'Bot message' };
   }
+
+  // In channels and group DMs, the bot only kicks off a fresh session when it
+  // is explicitly @-mentioned (`app_mention`). Plain `message` events are
+  // processed only if they are continuing an *existing* session for this
+  // (channel, thread, user) — i.e. follow-up replies inside a thread the bot
+  // is already part of. A top-level channel message without a mention starts
+  // no session, so it falls through and is ignored downstream. DMs
+  // (`channel_type === 'im'`) treat every message as in-scope.
+  const isChannelMessageWithoutMention =
+    slackEvent.type === 'message' && slackEvent.channel_type !== 'im';
 
   const messageText = slackEvent.text?.trim();
   if (!messageText) {
@@ -78,8 +153,10 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
     return { status: 'ignored', reason: 'Empty message after removing mention' };
   }
 
+  const isResetIntent = RESET_INTENT_PHRASES.has(cleanedMessage.trim().toLowerCase());
+
   const config = extractConfig(event);
-  
+
   if (!config.aiAgentId) {
     console.error(`[${requestId}] AI Agent ID not configured`);
     return { status: 'error', reason: 'AI Agent ID not configured' };
@@ -103,7 +180,6 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
   }
 
   const conversationRef = extractConversationReference(slackEvent);
-  const sessionId = generateSessionId(slackEvent);
 
   if (!conversationRef.channelName && conversationRef.channel) {
     try {
@@ -117,13 +193,15 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
     }
   }
 
-  // Determine thread_ts for replies - use existing thread or start a new one
+  // Determine thread_ts for replies — use existing thread or start a new one.
   const threadTs = slackEvent.thread_ts || slackEvent.ts;
+  conversationRef.threadTs = threadTs;
 
+  const timing = readSessionTimingConfig(event.input_data.global_values);
   const storeConfig: StoreConfig = {
     devrevEndpoint: config.devrevEndpointInternal,
     serviceAccountToken: config.serviceAccountToken,
-    timing: readSessionTimingConfig(event.input_data.global_values),
+    timing,
   };
 
   // Stamp the bot user id (the recipient of the @mention) onto the ref so it
@@ -140,25 +218,27 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
   // Verify user is in DevRev org and get act-as token for user-scoped AI execution
   let userToken = config.serviceAccountToken;
   let tokenType = 'service_account';
+  let devrevUserId: string | null = null;
+  let resolvedEmail: string | undefined;
 
   console.log(`[${requestId}] [MSG] Incoming message from Slack user: ${slackEvent.user}, channel: ${conversationRef.channel}, text: "${cleanedMessage.substring(0, 100)}"`);
 
   try {
     console.log(`[${requestId}] [AUTH] Resolving profile for Slack user: ${slackEvent.user}${config.mockEmailAddress ? ' (mock email override active)' : ''}`);
     const profile = await resolveUserProfile(slackEvent.user, config.slackBotToken, config.mockEmailAddress);
-    const userEmail = profile.email;
     if (profile.name) {
       conversationRef.userName = profile.name;
       console.log(`[${requestId}] [AUTH] Resolved user name: ${profile.name}`);
     }
 
-    if (userEmail) {
-      console.log(`[${requestId}] [AUTH] Resolved user email: ${userEmail}${config.mockEmailAddress ? ' [MOCKED]' : ''}`);
-      conversationRef.userEmail = userEmail;
-      const devrevUserId = await findUserByEmail(userEmail, config.devrevEndpointInternal, config.serviceAccountToken);
+    if (profile.email) {
+      console.log(`[${requestId}] [AUTH] Resolved user email: ${profile.email}${config.mockEmailAddress ? ' [MOCKED]' : ''}`);
+      conversationRef.userEmail = profile.email;
+      resolvedEmail = profile.email;
+      const found = await findUserByEmail(profile.email, config.devrevEndpointInternal, config.serviceAccountToken);
 
-      if (!devrevUserId) {
-        console.warn(`[${requestId}] [AUTH] User ${userEmail} is not in DevRev org — rejecting`);
+      if (!found) {
+        console.warn(`[${requestId}] [AUTH] User ${profile.email} is not in DevRev org — rejecting`);
         await sendMessage(
           conversationRef.channel,
           `Sorry, something went wrong. Please try again or contact your admin.`,
@@ -168,13 +248,14 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
         return { status: 'ignored', reason: 'User not in DevRev org' };
       }
 
+      devrevUserId = found;
       console.log(`[${requestId}] [AUTH] User verified in DevRev org: ${devrevUserId}, attempting act-as token`);
       conversationRef.devrevUserId = devrevUserId;
       const actAsToken = await getOrCreateActAsToken(devrevUserId, config.devrevEndpointInternal, config.serviceAccountToken);
       if (actAsToken) {
         userToken = actAsToken;
         tokenType = 'act_as (user PAT)';
-        console.log(`[${requestId}] [AUTH] Using act-as (user PAT) for user-scoped AI execution: ${userEmail}`);
+        console.log(`[${requestId}] [AUTH] Using act-as (user PAT) for user-scoped AI execution: ${profile.email}`);
       } else {
         console.warn(`[${requestId}] [AUTH] act-as token failed, falling back to service account PAT`);
       }
@@ -187,12 +268,56 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
 
   console.log(`[${requestId}] [AUTH] Token selected: ${tokenType}`);
 
-  // Persist the initial session record now that identity (email / devrev user)
-  // is resolved. Best-effort — failures don't block message delivery.
+  // Build session identity from the routing tuple + resolved metadata.
+  const routing = extractRoutingKeyParts(slackEvent);
+  const conversationKey = buildConversationKey(routing.channel, routing.threadTs, routing.userId);
+  const identity: SessionIdentity = {
+    conversationKey,
+    channel: conversationRef.channel,
+    channelName: conversationRef.channelName,
+    conversationType: conversationRef.conversationType,
+    threadTs,
+    messageTs: conversationRef.messageTs,
+    teamId: conversationRef.teamId,
+    userId: conversationRef.userId,
+    userName: conversationRef.userName,
+    botUserId: conversationRef.botUserId,
+  };
+  const userOverrides: SessionUserOverrides = {
+    devrevUserId: devrevUserId || undefined,
+    userEmail: resolvedEmail,
+  };
+
+  let sessionRecord: SessionRecord | null;
   try {
-    await storeConversationReference(storeConfig, sessionId, conversationRef);
-  } catch (storeErr: any) {
-    console.warn(`[${requestId}] [STORE] Initial reference persist failed: ${storeErr?.message || storeErr}`);
+    sessionRecord = await resolveSession(
+      storeConfig,
+      timing,
+      identity,
+      userOverrides,
+      isResetIntent ? 'reset' : 'message',
+      requestId,
+      isChannelMessageWithoutMention
+    );
+  } catch (resolveErr: any) {
+    console.error(`[${requestId}] [session] resolveSession failed: ${resolveErr?.message || resolveErr}`);
+    return { status: 'error', reason: 'Failed to resolve session', details: resolveErr?.message };
+  }
+
+  if (!sessionRecord) {
+    return { status: 'ignored', reason: 'Channel message outside of an active bot session' };
+  }
+
+  if (isResetIntent) {
+    await sendMessage(
+      conversationRef.channel,
+      'Started a new session. Send your next message to begin a fresh conversation.',
+      config.slackBotToken,
+      threadTs
+    ).catch((error: any) => {
+      console.warn(`[${requestId}] Failed to send new session confirmation: ${error?.message ?? error}`);
+    });
+    return { status: 'success', mode: 'new_session', session_id: sessionRecord.sessionId };
   }
 
   try {
@@ -206,34 +331,61 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
     console.log(`[${requestId}] [SLACK] Temp message sent, ts: ${tempMessageTs}`);
 
     conversationRef.tempMessageTs = tempMessageTs;
-    conversationRef.threadTs = threadTs;
 
-    // Create a real DevRev conversation so the AI agent has org context for data queries
+    // Persist routing patches onto the session — tempMessageTs lets the AI
+    // response handler update/delete the placeholder, and the rest keep the
+    // record current with whatever was resolved this turn. For collapsed
+    // DM sessions, threadTs/messageTs roll forward so the AI response goes
+    // to the latest message instead of the first DM ever.
+    try {
+      sessionRecord = await touchSession(storeConfig, sessionRecord, timing, {
+        tempMessageTs,
+        threadTs,
+        messageTs: conversationRef.messageTs,
+        channelName: conversationRef.channelName,
+        userEmail: resolvedEmail,
+        devrevUserId: devrevUserId || undefined,
+        botUserId: conversationRef.botUserId,
+      });
+    } catch (touchErr: any) {
+      console.warn(`[${requestId}] [STORE] touchSession failed (post-temp): ${touchErr?.message || touchErr}`);
+    }
+
+    // Create a real DevRev conversation so the AI agent has org context for data queries.
     console.log(`[${requestId}] [CONV] Creating DevRev conversation for org context`);
     const devrevConversationId = await createDevRevConversation(
       cleanedMessage,
       config.devrevEndpoint,
       config.serviceAccountToken
     );
-    const sessionObject = devrevConversationId || sessionId;
-    console.log(`[${requestId}] [CONV] session_object: ${sessionObject} (${devrevConversationId ? 'conversation DON' : 'fallback session id'})`);
-
-    try {
-      await storeConversationReference(storeConfig, sessionObject, conversationRef);
-      console.log(`[${requestId}] [STORE] Conversation reference stored for session: ${sessionObject}`);
-    } catch (storeErr: any) {
-      console.warn(`[${requestId}] [STORE] Persist for sessionObject failed: ${storeErr?.message || storeErr}`);
+    if (devrevConversationId) {
+      try {
+        sessionRecord = await touchSession(storeConfig, sessionRecord, timing, {
+          devrevConversationId,
+        });
+      } catch (touchErr: any) {
+        console.warn(`[${requestId}] [STORE] touchSession failed (post-conversation): ${touchErr?.message || touchErr}`);
+      }
     }
 
-    console.log(`[${requestId}] [AI] Sending message to agent: agentId=${config.aiAgentId}, sessionObject=${sessionObject}, tokenType=${tokenType}`);
+    // session_object is what the AI Agent uses for its own server-side context.
+    // Prefer the DevRev conversation DON; fall back to our session UUID if
+    // conversation creation failed.
+    const sessionObject = devrevConversationId || sessionRecord.sessionId;
+    console.log(
+      `[${requestId}] [CONV] session_object: ${sessionObject} (${devrevConversationId ? 'conversation DON' : 'fallback session UUID'}); routing session_id: ${sessionRecord.sessionId}`
+    );
+
+    console.log(`[${requestId}] [AI] Sending message to agent: agentId=${config.aiAgentId}, sessionObject=${sessionObject}, sessionId=${sessionRecord.sessionId}, tokenType=${tokenType}`);
     console.log(`[${requestId}] [AI] Message to agent: "${cleanedMessage.substring(0, 200)}"`);
-    await callAIAgentAsync(cleanedMessage, sessionObject, conversationRef, config, userToken);
+    await callAIAgentAsync(cleanedMessage, sessionObject, sessionRecord.sessionId, conversationRef, config, userToken);
     console.log(`[${requestId}] [AI] Message submitted to AI Agent successfully`);
 
     return {
       status: 'success',
       mode: 'async',
-      session_id: sessionObject,
+      session_id: sessionRecord.sessionId,
+      session_object: sessionObject,
       message: 'Request submitted, responses will be sent via ai_agent_response events',
     };
   } catch (error: any) {
@@ -258,8 +410,6 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
 
 /**
  * Extract configuration from event.
- *
- * Purpose: Gathers all necessary IDs, tokens, and endpoints from the function input metadata and global configuration.
  */
 function extractConfig(event: FunctionInput): any {
   const { input_data, execution_metadata, context } = event;
@@ -317,7 +467,6 @@ async function createDevRevConversation(
     if (!id) return null;
     console.log(`[Conversation] Created conversation: ${id}`);
 
-    // Post the message as a timeline entry so the AI agent has context
     await sdk.timelineEntriesCreate({
       object: id,
       type: betaSDK.TimelineEntriesCreateRequestType.TimelineComment,
@@ -335,10 +484,15 @@ async function createDevRevConversation(
 
 /**
  * Call the AI Agent API asynchronously using the DevRev SDK.
+ *
+ * `sessionObject` goes to DevRev as the AI Agent's server-side context handle
+ * (preferably the conversation DON). `sessionId` is OUR routing identity (our
+ * UUID) and is what the response handler keys on via client_metadata.
  */
 async function callAIAgentAsync(
   message: string,
   sessionObject: string,
+  sessionId: string,
   conversationRef: ConversationReference,
   config: any,
   token: string
@@ -355,7 +509,7 @@ async function callAIAgentAsync(
     session_object: sessionObject,
     event: { input_message: { message } },
     client_metadata: {
-      session_id: sessionObject,
+      session_id: sessionId,
       slack_bot_token: config.slackBotToken,
       conversation_reference: conversationRef,
     },
@@ -375,7 +529,7 @@ async function callAIAgentAsync(
 }
 
 /**
- * Exported run function - entry point for the snap-in function.
+ * Exported run function — entry point for the snap-in function.
  */
 export const run = async (events: FunctionInput[]): Promise<any> => {
   const results = await Promise.all(
@@ -391,7 +545,7 @@ export const run = async (events: FunctionInput[]): Promise<any> => {
       }
     })
   );
-  
+
   return results.length === 1 ? results[0] : results;
 };
 
