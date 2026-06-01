@@ -6,7 +6,7 @@ import {
   endSession,
   getActiveSession,
   getSessionById,
-  getSessionByDevrevConversationId,
+  getSessionByConversationId,
   isSessionExpired,
   listHardExpiredSessions,
   listIdleExpiredSessions,
@@ -22,6 +22,11 @@ import { SESSION_FIELD } from '../session-fields';
 
 jest.mock('axios');
 const mockedAxios = axios as jest.Mocked<typeof axios>;
+
+jest.mock('../devrev-auth', () => ({
+  getOrCreateActAsToken: jest.fn().mockResolvedValue(null),
+  findUserByEmail: jest.fn(),
+}));
 
 const timing = {
   idleTtlMs: 60 * 60 * 1000, // 1h
@@ -52,7 +57,6 @@ const identity = {
 interface FieldsOverrides {
   sessionId?: string;
   conversationKey?: string;
-  devrevConversationId?: string;
   tempMessageTs?: string;
   status?: string;
   generation?: number;
@@ -81,7 +85,6 @@ function fieldsForRecord(overrides: FieldsOverrides = {}) {
     [SESSION_FIELD.userEmail]: 'alice@example.com',
     [SESSION_FIELD.botUserId]: 'UBOT00000',
     [SESSION_FIELD.devrevUserId]: 'don:identity:dvrv-us-1:devo/x:devu/y',
-    [SESSION_FIELD.devrevConversationId]: overrides.devrevConversationId ?? '',
     [SESSION_FIELD.tempMessageTs]: overrides.tempMessageTs ?? '',
     [SESSION_FIELD.status]: overrides.status || 'active',
     [SESSION_FIELD.generation]: overrides.generation ?? 0,
@@ -99,6 +102,36 @@ function fieldsForRecord(overrides: FieldsOverrides = {}) {
   };
 }
 
+function emptyRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
+  return {
+    objectId: '',
+    sessionId: '',
+    conversationKey,
+    channel: '',
+    channelName: '',
+    conversationType: '',
+    threadTs: '',
+    messageTs: '',
+    teamId: '',
+    userId: '',
+    userName: '',
+    userEmail: '',
+    botUserId: '',
+    devrevUserId: '',
+    tempMessageTs: '',
+    status: 'active',
+    generation: 0,
+    previousSessionId: '',
+    endReason: '',
+    messageCount: 0,
+    createdAt: 0,
+    lastUsedAt: 0,
+    expiresAt: 0,
+    hardExpiresAt: 0,
+    ...overrides,
+  };
+}
+
 describe('session-store state machine', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -113,34 +146,34 @@ describe('session-store state machine', () => {
     expect(buildConversationKey('c', 't', 'other')).not.toBe(a);
   });
 
-  test('createSession writes a record with active status, gen=0, full TTL window', async () => {
-    mockedAxios.post.mockResolvedValueOnce({ data: { custom_object: { id: 'co-create' } } });
+  test('createSession writes a conversation with active status, gen=0, full TTL window', async () => {
+    mockedAxios.post.mockResolvedValueOnce({ data: { conversation: { id: 'conv-create' } } });
     const record = await createSession(config, { identity, devrevUserId: 'du-1', userEmail: 'a@x.com' });
 
     expect(mockedAxios.post).toHaveBeenCalledTimes(1);
     const [url, body] = mockedAxios.post.mock.calls[0];
-    expect(url).toContain('/custom-objects.create');
+    expect(url).toContain('/conversations.create');
     const create = body as any;
-    expect(create.leaf_type).toBe('slack_ai_session');
-    expect(create.unique_key).toBe(`slack_ai_session_${record.sessionId}`);
+    expect(create.type).toBe('support');
+    expect(create.custom_schema_spec).toEqual({ tenant_fragment: true, validate_required_fields: true });
     expect(create.custom_fields[SESSION_FIELD.sessionId]).toBe(record.sessionId);
     expect(create.custom_fields[SESSION_FIELD.conversationKey]).toBe(conversationKey);
     expect(create.custom_fields[SESSION_FIELD.status]).toBe('active');
     expect(create.custom_fields[SESSION_FIELD.generation]).toBe(0);
-    expect(create.custom_fields[SESSION_FIELD.messageCount]).toBe(0);
     expect(create.custom_fields[SESSION_FIELD.userEmail]).toBe('a@x.com');
     expect(create.custom_fields[SESSION_FIELD.devrevUserId]).toBe('du-1');
+    expect(create.members).toEqual(['du-1']);
+    expect(create.owned_by).toEqual(['du-1']);
     expect(record.status).toBe('active');
     expect(record.generation).toBe(0);
-    expect(record.objectId).toBe('co-create');
+    expect(record.objectId).toBe('conv-create');
   });
 
   test('touchSession rolls TTLs forward, increments messageCount, omits immutable session_id', async () => {
-    mockedAxios.post.mockResolvedValueOnce({ data: { custom_object: { id: 'co-touch' } } });
-    const record: SessionRecord = {
-      objectId: 'co-touch',
+    mockedAxios.post.mockResolvedValueOnce({ data: {} });
+    const record = emptyRecord({
+      objectId: 'conv-touch',
       sessionId: 'uuid-touch',
-      conversationKey,
       channel: 'C',
       channelName: 'general',
       conversationType: 'channel',
@@ -149,35 +182,25 @@ describe('session-store state machine', () => {
       teamId: 'T',
       userId: 'U',
       userName: 'Alice',
-      userEmail: '',
       botUserId: 'UBOT',
-      devrevUserId: '',
-      devrevConversationId: '',
-      tempMessageTs: '',
-      status: 'active',
-      generation: 0,
-      previousSessionId: '',
-      endReason: '',
       messageCount: 3,
       createdAt: Date.now() - 60_000,
       lastUsedAt: Date.now() - 60_000,
       expiresAt: Date.now() - 60_000,
       hardExpiresAt: Date.now() + timing.absoluteTtlMs,
-    };
+    });
 
     const updated = await touchSession(config, record, timing, {
       tempMessageTs: 'new-temp',
-      devrevConversationId: 'don:core:dvrv-us-1:devo/x:conversation/abc',
     });
 
     expect(mockedAxios.post).toHaveBeenCalledTimes(1);
-    const [, body] = mockedAxios.post.mock.calls[0];
+    const [url, body] = mockedAxios.post.mock.calls[0];
+    expect(url).toContain('/conversations.update');
     const update = body as any;
+    expect(update.id).toBe('conv-touch');
     expect(update.custom_fields[SESSION_FIELD.sessionId]).toBeUndefined();
     expect(update.custom_fields[SESSION_FIELD.tempMessageTs]).toBe('new-temp');
-    expect(update.custom_fields[SESSION_FIELD.devrevConversationId]).toBe(
-      'don:core:dvrv-us-1:devo/x:conversation/abc'
-    );
     expect(update.custom_fields[SESSION_FIELD.messageCount]).toBe(4);
     expect(updated.messageCount).toBe(4);
     expect(updated.expiresAt).toBeGreaterThan(record.expiresAt);
@@ -186,33 +209,18 @@ describe('session-store state machine', () => {
   test('patchSession applies routing patch without rolling TTLs or messageCount', async () => {
     mockedAxios.post.mockResolvedValueOnce({ data: {} });
     const baseExpiry = Date.now() + 30_000;
-    const record: SessionRecord = {
-      objectId: 'co-p',
+    const record = emptyRecord({
+      objectId: 'conv-p',
       sessionId: 'uuid-p',
-      conversationKey,
       channel: 'C',
-      channelName: '',
-      conversationType: '',
-      threadTs: '',
-      messageTs: '',
-      teamId: '',
       userId: 'U',
-      userName: '',
-      userEmail: '',
-      botUserId: '',
-      devrevUserId: '',
-      devrevConversationId: '',
       tempMessageTs: 'old',
-      status: 'active',
-      generation: 0,
-      previousSessionId: '',
-      endReason: '',
       messageCount: 5,
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
       expiresAt: baseExpiry,
       hardExpiresAt: baseExpiry + 60_000,
-    };
+    });
 
     const updated = await patchSession(config, record, { tempMessageTs: null });
     expect(updated.tempMessageTs).toBe('');
@@ -222,38 +230,25 @@ describe('session-store state machine', () => {
 
   test('endSession flips active → expired with idle_timeout, sets endReason', async () => {
     mockedAxios.post.mockResolvedValueOnce({ data: {} });
-    const record: SessionRecord = {
-      objectId: 'co-end',
+    const record = emptyRecord({
+      objectId: 'conv-end',
       sessionId: 'uuid-end',
-      conversationKey,
       channel: 'C',
-      channelName: '',
-      conversationType: '',
-      threadTs: '',
-      messageTs: '',
-      teamId: '',
       userId: 'U',
-      userName: '',
-      userEmail: '',
-      botUserId: '',
-      devrevUserId: '',
-      devrevConversationId: '',
-      tempMessageTs: '',
-      status: 'active',
       generation: 1,
       previousSessionId: 'uuid-prev',
-      endReason: '',
       messageCount: 2,
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
       expiresAt: Date.now(),
       hardExpiresAt: Date.now() + 60_000,
-    };
+    });
 
     const updated = await endSession(config, record, 'idle_timeout');
     expect(updated.status).toBe('expired');
     expect(updated.endReason).toBe('idle_timeout');
 
+    mockedAxios.post.mockResolvedValueOnce({ data: {} });
     const updated2 = await endSession(config, { ...record, status: 'active' }, 'user_reset');
     expect(updated2.status).toBe('ended');
     expect(updated2.endReason).toBe('user_reset');
@@ -263,12 +258,11 @@ describe('session-store state machine', () => {
     // endSession update + createSession create
     mockedAxios.post
       .mockResolvedValueOnce({ data: {} })
-      .mockResolvedValueOnce({ data: { custom_object: { id: 'co-new' } } });
+      .mockResolvedValueOnce({ data: { conversation: { id: 'conv-new' } } });
 
-    const previous: SessionRecord = {
-      objectId: 'co-prev',
+    const previous = emptyRecord({
+      objectId: 'conv-prev',
       sessionId: 'uuid-prev',
-      conversationKey,
       channel: 'C',
       channelName: 'general',
       conversationType: 'channel',
@@ -280,18 +274,14 @@ describe('session-store state machine', () => {
       userEmail: 'a@x.com',
       botUserId: 'UBOT',
       devrevUserId: 'du-1',
-      devrevConversationId: '',
-      tempMessageTs: '',
-      status: 'active',
       generation: 2,
       previousSessionId: 'uuid-grand',
-      endReason: '',
       messageCount: 4,
       createdAt: Date.now() - 1000,
       lastUsedAt: Date.now() - 500,
       expiresAt: Date.now() + 1000,
       hardExpiresAt: Date.now() + timing.absoluteTtlMs,
-    };
+    });
 
     const next = await rotateSession(config, previous, 'absolute_timeout', {}, timing, {
       devrevUserId: 'du-1',
@@ -304,78 +294,34 @@ describe('session-store state machine', () => {
     expect(next.conversationKey).toBe(conversationKey);
 
     const [endCall, createCall] = mockedAxios.post.mock.calls;
-    expect(endCall[0]).toContain('/custom-objects.update');
+    expect(endCall[0]).toContain('/conversations.update');
     expect((endCall[1] as any).custom_fields[SESSION_FIELD.status]).toBe('expired');
     expect((endCall[1] as any).custom_fields[SESSION_FIELD.endReason]).toBe('absolute_timeout');
-    expect(createCall[0]).toContain('/custom-objects.create');
+    expect(createCall[0]).toContain('/conversations.create');
     expect((createCall[1] as any).custom_fields[SESSION_FIELD.previousSessionId]).toBe('uuid-prev');
     expect((createCall[1] as any).custom_fields[SESSION_FIELD.generation]).toBe(3);
   });
 
-  test('deleteSession calls /custom-objects.delete with the cached objectId', async () => {
+  test('deleteSession calls /conversations.delete with the cached objectId', async () => {
     mockedAxios.post.mockResolvedValueOnce({ data: {} });
-    const record: SessionRecord = {
-      objectId: 'co-del',
+    const record = emptyRecord({
+      objectId: 'conv-del',
       sessionId: 'uuid-del',
-      conversationKey,
-      channel: '',
-      channelName: '',
-      conversationType: '',
-      threadTs: '',
-      messageTs: '',
-      teamId: '',
-      userId: '',
-      userName: '',
-      userEmail: '',
-      botUserId: '',
-      devrevUserId: '',
-      devrevConversationId: '',
-      tempMessageTs: '',
       status: 'expired',
-      generation: 0,
-      previousSessionId: '',
       endReason: 'absolute_timeout',
-      messageCount: 0,
-      createdAt: 0,
-      lastUsedAt: 0,
-      expiresAt: 0,
-      hardExpiresAt: 0,
-    };
+    });
     await deleteSession(config, record);
     const [url, body] = mockedAxios.post.mock.calls[0];
-    expect(url).toContain('/custom-objects.delete');
-    expect((body as any).id).toBe('co-del');
+    expect(url).toContain('/conversations.delete');
+    expect((body as any).id).toBe('conv-del');
   });
 
   test('isSessionExpired returns absolute_timeout when hardExpiresAt elapsed', () => {
     const past = Date.now() - 1000;
-    const record: SessionRecord = {
-      objectId: '',
-      sessionId: '',
-      conversationKey: '',
-      channel: '',
-      channelName: '',
-      conversationType: '',
-      threadTs: '',
-      messageTs: '',
-      teamId: '',
-      userId: '',
-      userName: '',
-      userEmail: '',
-      botUserId: '',
-      devrevUserId: '',
-      devrevConversationId: '',
-      tempMessageTs: '',
-      status: 'active',
-      generation: 0,
-      previousSessionId: '',
-      endReason: '',
-      messageCount: 0,
-      createdAt: 0,
-      lastUsedAt: 0,
+    const record = emptyRecord({
       expiresAt: past - 1000,
       hardExpiresAt: past,
-    };
+    });
     expect(isSessionExpired(record)).toBe('absolute_timeout');
 
     record.hardExpiresAt = Date.now() + 60_000;
@@ -385,10 +331,9 @@ describe('session-store state machine', () => {
     expect(isSessionExpired(record)).toBeNull();
   });
 
-  test('getActiveSession lists records, filters by conversationKey + status=active, picks latest', async () => {
+  test('getActiveSession lists conversations, filters by conversationKey + status=active, picks latest', async () => {
     const stale = {
-      id: 'co-old',
-      unique_key: 'slack_ai_session_uuid-old',
+      id: 'conv-old',
       custom_fields: fieldsForRecord({
         sessionId: 'uuid-old',
         status: 'active',
@@ -396,8 +341,7 @@ describe('session-store state machine', () => {
       }),
     };
     const recent = {
-      id: 'co-new',
-      unique_key: 'slack_ai_session_uuid-new',
+      id: 'conv-new',
       custom_fields: fieldsForRecord({
         sessionId: 'uuid-new',
         status: 'active',
@@ -405,8 +349,7 @@ describe('session-store state machine', () => {
       }),
     };
     const wrongKey = {
-      id: 'co-wrong',
-      unique_key: 'slack_ai_session_uuid-wrong',
+      id: 'conv-wrong',
       custom_fields: fieldsForRecord({
         sessionId: 'uuid-wrong',
         status: 'active',
@@ -414,61 +357,55 @@ describe('session-store state machine', () => {
       }),
     };
     const ended = {
-      id: 'co-ended',
-      unique_key: 'slack_ai_session_uuid-ended',
+      id: 'conv-ended',
       custom_fields: fieldsForRecord({ sessionId: 'uuid-ended', status: 'ended' }),
     };
 
-    mockedAxios.post.mockResolvedValueOnce({ data: { result: [stale, recent, wrongKey, ended] } });
+    mockedAxios.post.mockResolvedValueOnce({ data: { conversations: [stale, recent, wrongKey, ended] } });
     const found = await getActiveSession(config, conversationKey);
     expect(found?.sessionId).toBe('uuid-new');
   });
 
   test('getActiveSession returns null when no active record matches', async () => {
-    mockedAxios.post.mockResolvedValueOnce({ data: { result: [] } });
+    mockedAxios.post.mockResolvedValueOnce({ data: { conversations: [] } });
     expect(await getActiveSession(config, conversationKey)).toBeNull();
   });
 
-  test('getSessionById hits /custom-objects.list to find by unique_key when not cached', async () => {
-    const co = {
-      id: 'co-by-id',
-      unique_key: 'slack_ai_session_uuid-x',
+  test('getSessionById hits /conversations.list to find by tnt__session_id when not cached', async () => {
+    const conv = {
+      id: 'conv-by-id',
       custom_fields: fieldsForRecord({ sessionId: 'uuid-x' }),
     };
-    mockedAxios.post.mockResolvedValueOnce({ data: { result: [co] } });
+    mockedAxios.post.mockResolvedValueOnce({ data: { conversations: [conv] } });
     const r = await getSessionById(config, 'uuid-x');
     expect(r?.sessionId).toBe('uuid-x');
-    expect(mockedAxios.post.mock.calls[0][0]).toContain('/custom-objects.list');
+    expect(mockedAxios.post.mock.calls[0][0]).toContain('/conversations.list');
   });
 
-  test('getSessionByDevrevConversationId filters by devrev_conversation_id', async () => {
+  test('getSessionByConversationId hits /conversations.get with the DON', async () => {
     const matching = {
-      id: 'co-match',
-      unique_key: 'slack_ai_session_uuid-match',
+      id: 'don:core:dvrv-us-1:devo/x:conversation/123',
       custom_fields: fieldsForRecord({
         sessionId: 'uuid-match',
-        devrevConversationId: 'don:core:dvrv-us-1:devo/x:conversation/123',
       }),
     };
-    const other = {
-      id: 'co-other',
-      unique_key: 'slack_ai_session_uuid-other',
-      custom_fields: fieldsForRecord({ sessionId: 'uuid-other' }),
-    };
-    mockedAxios.post.mockResolvedValueOnce({ data: { result: [other, matching] } });
-    const r = await getSessionByDevrevConversationId(
+    mockedAxios.post.mockResolvedValueOnce({ data: { conversation: matching } });
+    const r = await getSessionByConversationId(
       config,
       'don:core:dvrv-us-1:devo/x:conversation/123'
     );
     expect(r?.sessionId).toBe('uuid-match');
+    expect(mockedAxios.post.mock.calls[0][0]).toContain('/conversations.get');
+    expect((mockedAxios.post.mock.calls[0][1] as any).id).toBe(
+      'don:core:dvrv-us-1:devo/x:conversation/123'
+    );
   });
 
   test('listIdleExpiredSessions returns active rows whose idle TTL elapsed but not absolute', async () => {
     const past = Date.now() - 60_000;
     const future = Date.now() + 60_000;
     const idle = {
-      id: 'co-idle',
-      unique_key: 'slack_ai_session_uuid-idle',
+      id: 'conv-idle',
       custom_fields: fieldsForRecord({
         sessionId: 'uuid-idle',
         status: 'active',
@@ -477,8 +414,7 @@ describe('session-store state machine', () => {
       }),
     };
     const fresh = {
-      id: 'co-fresh',
-      unique_key: 'slack_ai_session_uuid-fresh',
+      id: 'conv-fresh',
       custom_fields: fieldsForRecord({
         sessionId: 'uuid-fresh',
         status: 'active',
@@ -487,8 +423,7 @@ describe('session-store state machine', () => {
       }),
     };
     const inactive = {
-      id: 'co-inactive',
-      unique_key: 'slack_ai_session_uuid-inactive',
+      id: 'conv-inactive',
       custom_fields: fieldsForRecord({
         sessionId: 'uuid-inactive',
         status: 'expired',
@@ -496,7 +431,7 @@ describe('session-store state machine', () => {
         hardExpiresAt: future,
       }),
     };
-    mockedAxios.post.mockResolvedValueOnce({ data: { result: [idle, fresh, inactive] } });
+    mockedAxios.post.mockResolvedValueOnce({ data: { conversations: [idle, fresh, inactive] } });
     const res = await listIdleExpiredSessions(config);
     expect(res).toHaveLength(1);
     expect(res[0].sessionId).toBe('uuid-idle');
@@ -506,8 +441,7 @@ describe('session-store state machine', () => {
     const past = Date.now() - 60_000;
     const future = Date.now() + 60_000;
     const hardActive = {
-      id: 'co-hard-a',
-      unique_key: 'slack_ai_session_uuid-hard-a',
+      id: 'conv-hard-a',
       custom_fields: fieldsForRecord({
         sessionId: 'uuid-hard-a',
         status: 'active',
@@ -515,8 +449,7 @@ describe('session-store state machine', () => {
       }),
     };
     const hardExpired = {
-      id: 'co-hard-e',
-      unique_key: 'slack_ai_session_uuid-hard-e',
+      id: 'conv-hard-e',
       custom_fields: fieldsForRecord({
         sessionId: 'uuid-hard-e',
         status: 'expired',
@@ -524,24 +457,22 @@ describe('session-store state machine', () => {
       }),
     };
     const fresh = {
-      id: 'co-fresh',
-      unique_key: 'slack_ai_session_uuid-fresh',
+      id: 'conv-fresh',
       custom_fields: fieldsForRecord({
         sessionId: 'uuid-fresh',
         status: 'active',
         hardExpiresAt: future,
       }),
     };
-    mockedAxios.post.mockResolvedValueOnce({ data: { result: [hardActive, hardExpired, fresh] } });
+    mockedAxios.post.mockResolvedValueOnce({ data: { conversations: [hardActive, hardExpired, fresh] } });
     const res = await listHardExpiredSessions(config);
     expect(res.map((r) => r.sessionId).sort()).toEqual(['uuid-hard-a', 'uuid-hard-e']);
   });
 
   test('recordToConversationReference maps SessionRecord to ConversationReference shape', () => {
-    const record: SessionRecord = {
-      objectId: 'co-x',
+    const record = emptyRecord({
+      objectId: 'conv-x',
       sessionId: 'uuid-x',
-      conversationKey,
       channel: 'C0123456789',
       channelName: 'general',
       conversationType: 'channel',
@@ -553,18 +484,10 @@ describe('session-store state machine', () => {
       userEmail: 'a@x.com',
       botUserId: 'UBOT',
       devrevUserId: 'du-1',
-      devrevConversationId: '',
       tempMessageTs: 'temp',
-      status: 'active',
-      generation: 0,
-      previousSessionId: '',
-      endReason: '',
-      messageCount: 0,
       createdAt: 1700000000000,
       lastUsedAt: 1700000001000,
-      expiresAt: 0,
-      hardExpiresAt: 0,
-    };
+    });
     const ref = recordToConversationReference(record);
     expect(ref.channel).toBe('C0123456789');
     expect(ref.channelName).toBe('general');

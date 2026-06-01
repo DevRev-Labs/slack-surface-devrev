@@ -6,6 +6,9 @@ import { SessionRecord } from '../../../utils/session-store';
 
 jest.mock('../../../utils/session-store');
 jest.mock('../../../utils/slack-client');
+jest.mock('../../../utils/timeline', () => ({
+  postTimelineComment: jest.fn().mockResolvedValue('ti-mock'),
+}));
 
 const mockedSessionStore = sessionStore as jest.Mocked<typeof sessionStore>;
 const mockedSlackClient = slackClient as jest.Mocked<typeof slackClient>;
@@ -26,7 +29,6 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     userEmail: 'alice@example.com',
     botUserId: 'UBOT00000',
     devrevUserId: 'dev-user-123',
-    devrevConversationId: '',
     tempMessageTs: '',
     status: 'active',
     generation: 0,
@@ -81,7 +83,7 @@ describe('ai_response_handler', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockedSessionStore.getSessionById.mockImplementation(async () => makeRecord());
-    mockedSessionStore.getSessionByDevrevConversationId.mockResolvedValue(null);
+    mockedSessionStore.getSessionByConversationId.mockResolvedValue(null);
     mockedSessionStore.patchSession.mockImplementation(async (_c, record) => record);
     mockedSessionStore.recordToConversationReference.mockImplementation((record) => ({
       channel: record.channel,
@@ -325,36 +327,4 @@ describe('ai_response_handler', () => {
     expect(result.reason).toBe('Suggestions event');
   });
 
-  test('timeline_entry_created path resolves session via getSessionByDevrevConversationId', async () => {
-    mockedSessionStore.getSessionById.mockResolvedValue(null);
-    mockedSessionStore.getSessionByDevrevConversationId.mockResolvedValue(
-      makeRecord({ devrevConversationId: 'don:core:dvrv-us-1:devo/x:conversation/abc' })
-    );
-    const timelineEvent = {
-      ...mockEvent,
-      payload: {
-        timeline_entry_created: {
-          entry: {
-            visibility: 'external',
-            object: { id: 'don:core:dvrv-us-1:devo/x:conversation/abc' },
-            text: 'Forwarded body',
-            created_by: { id: 'someone-else' },
-          },
-        },
-      },
-    };
-
-    const result = await run([timelineEvent]);
-    expect(mockedSessionStore.getSessionByDevrevConversationId).toHaveBeenCalledWith(
-      expect.anything(),
-      'don:core:dvrv-us-1:devo/x:conversation/abc'
-    );
-    expect(mockedSlackClient.sendMessage).toHaveBeenCalledWith(
-      'C0123456789',
-      expect.stringContaining('Forwarded body'),
-      'xoxb-test-token',
-      '1705315800.000100'
-    );
-    expect(result.status).toBe('success');
-  });
 });

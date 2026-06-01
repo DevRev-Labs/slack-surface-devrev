@@ -51,7 +51,7 @@ describe('ensure_session_state_schema', () => {
     jest.clearAllMocks();
   });
 
-  test('creates the slack_ai_session schema on activate hook', async () => {
+  test('attaches the Slack session fields to the conversation leaf type on activate hook', async () => {
     mockCustomSchemaFragmentsSet.mockResolvedValue({ data: { id: 'schema-id' } });
 
     const result = await run([activateEvent]);
@@ -62,8 +62,8 @@ describe('ensure_session_state_schema', () => {
     });
     expect(mockCustomSchemaFragmentsSet).toHaveBeenCalledTimes(1);
     const call = mockCustomSchemaFragmentsSet.mock.calls[0][0];
-    expect(call.leaf_type).toBe('slack_ai_session');
-    expect(call.is_custom_leaf_type).toBe(true);
+    expect(call.leaf_type).toBe('conversation');
+    expect(call.is_custom_leaf_type).toBe(false);
     // Field names must include all the slack-specific routing fields.
     const fieldNames = call.fields.map((f: any) => f.name);
     expect(fieldNames).toEqual(

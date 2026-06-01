@@ -1,5 +1,5 @@
 /**
- * Shared types for the Slack AI Integration snap-in
+ * Shared types for the Slack Surface snap-in
  */
 
 export interface FunctionInput {

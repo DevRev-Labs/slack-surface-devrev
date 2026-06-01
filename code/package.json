@@ -1,5 +1,5 @@
 {
-  "name": "slack-ai-integration",
+  "name": "slack-surface",
   "version": "1.0.0",
   "description": "DevRev snap-in that integrates Slack with DevRev AI Agents",
   "main": "./dist/index.js",
