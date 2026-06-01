@@ -23,23 +23,17 @@ jest.mock('../../../utils/slack-signature-validator', () => ({
 
 // Mock the DevRev SDK so the AI agent call doesn't hit the network.
 const mockExecuteAsync = jest.fn().mockResolvedValue(undefined);
-const mockConversationsCreate = jest.fn().mockResolvedValue({
-  data: { conversation: { id: 'don:core:dvrv-us-1:devo/x:conversation/abc' } },
-});
-const mockTimelineEntriesCreate = jest.fn().mockResolvedValue({});
 jest.mock('@devrev/typescript-sdk', () => ({
-  betaSDK: {
-    ConversationsCreateRequestTypeValue: { Support: 'support' },
-    TimelineEntriesCreateRequestType: { TimelineComment: 'timeline_comment' },
-    TimelineEntryVisibility: { External: 'external' },
-  },
   client: {
     setupBeta: () => ({
       aiAgentEventsExecuteAsync: mockExecuteAsync,
-      conversationsCreate: mockConversationsCreate,
-      timelineEntriesCreate: mockTimelineEntriesCreate,
     }),
   },
+}));
+
+// Mirror the user's message into the conversation timeline. Stub away.
+jest.mock('../../../utils/timeline', () => ({
+  postTimelineComment: jest.fn().mockResolvedValue('ti-mock'),
 }));
 
 const mockedConvStore = convStore as jest.Mocked<typeof convStore>;
@@ -63,7 +57,6 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     userEmail: 'user@example.com',
     botUserId: 'UBOT00000',
     devrevUserId: 'dev-user-123',
-    devrevConversationId: '',
     tempMessageTs: '',
     status: 'active',
     generation: 0,
@@ -173,10 +166,6 @@ describe('slack_handler', () => {
     mockedDevrevAuth.getOrCreateActAsToken.mockResolvedValue('act-as-token');
 
     mockExecuteAsync.mockClear().mockResolvedValue(undefined);
-    mockConversationsCreate.mockClear().mockResolvedValue({
-      data: { conversation: { id: 'don:core:dvrv-us-1:devo/x:conversation/abc' } },
-    });
-    mockTimelineEntriesCreate.mockClear().mockResolvedValue({});
   });
 
   test('processes Slack message, creates a session, and submits to AI Agent (async)', async () => {
@@ -193,11 +182,11 @@ describe('slack_handler', () => {
       '1705315800.000100'
     );
 
-    // session_object should prefer the DevRev conversation DON.
+    // session_object IS the session's conversation DON (record.objectId).
     expect(mockExecuteAsync).toHaveBeenCalledWith(
       expect.objectContaining({
         agent: 'don:core:dvrv-us-1:devo/123:ai_agent/456',
-        session_object: 'don:core:dvrv-us-1:devo/x:conversation/abc',
+        session_object: 'co-1',
         client_metadata: expect.objectContaining({ session_id: 'uuid-new' }),
       })
     );

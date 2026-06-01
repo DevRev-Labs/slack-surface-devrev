@@ -22,7 +22,6 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     userEmail: '',
     botUserId: '',
     devrevUserId: '',
-    devrevConversationId: '',
     tempMessageTs: '',
     status: 'active',
     generation: 0,

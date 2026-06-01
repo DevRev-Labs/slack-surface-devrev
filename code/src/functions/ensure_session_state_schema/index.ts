@@ -4,40 +4,34 @@ import {
   CustomSchemaFragmentsSetRequestType,
   SchemaFieldDescriptor,
 } from '@devrev/typescript-sdk/dist/auto-generated/beta/beta-devrev-sdk';
-import { FunctionInput } from '../../types';
-import {
-  SESSION_LEAF_TYPE,
-  SESSION_LEAF_TYPE_DESCRIPTION,
-  SESSION_LEAF_TYPE_ID_PREFIX,
-} from '../../utils/session-config';
-import {
-  SESSION_FIELD_SPECS,
-  SchemaFieldSpec,
-} from '../../utils/session-fields';
 
+import { FunctionInput } from '../../types';
+import { SESSION_LEAF_TYPE, SESSION_LEAF_TYPE_DESCRIPTION } from '../../utils/session-config';
+import { SchemaFieldSpec, SESSION_FIELD_SPECS } from '../../utils/session-fields';
+
+// Tenant-fragment schema attached to the built-in `conversation` leaf type so
+// every conversation in the dev org carries the Slack session fields.
 interface SchemaSpec {
   leaf_type: string;
   description: string;
-  id_prefix: string;
   fields: SchemaFieldSpec[];
 }
 
 const SCHEMAS: SchemaSpec[] = [
   {
-    leaf_type: SESSION_LEAF_TYPE,
     description: SESSION_LEAF_TYPE_DESCRIPTION,
-    id_prefix: SESSION_LEAF_TYPE_ID_PREFIX,
     fields: SESSION_FIELD_SPECS,
+    leaf_type: SESSION_LEAF_TYPE,
   },
 ];
 
 function toSchemaFieldDescriptor(spec: SchemaFieldSpec): SchemaFieldDescriptor {
   return {
-    name: spec.name,
     field_type: spec.field_type as any,
-    is_required: spec.is_required ?? false,
     is_filterable: spec.is_filterable ?? false,
     is_immutable: spec.is_immutable ?? false,
+    is_required: spec.is_required ?? false,
+    name: spec.name,
   } as SchemaFieldDescriptor;
 }
 
@@ -46,7 +40,7 @@ async function ensureSessionStateSchema(event: FunctionInput): Promise<any> {
   const eventType = event.execution_metadata.event_type;
 
   if (eventType !== 'hook:snap_in_activate') {
-    return { status: 'ignored', reason: `Unsupported event type: ${eventType}` };
+    return { reason: `Unsupported event type: ${eventType}`, status: 'ignored' };
   }
 
   const devrevEndpoint = event.execution_metadata.devrev_endpoint.replace(/\/$/, '');
@@ -62,12 +56,11 @@ async function ensureSessionStateSchema(event: FunctionInput): Promise<any> {
 
   for (const spec of SCHEMAS) {
     const payload: CustomSchemaFragmentsSetRequest = {
-      type: CustomSchemaFragmentsSetRequestType.TenantFragment,
-      leaf_type: spec.leaf_type,
-      is_custom_leaf_type: true,
       description: spec.description,
-      id_prefix: spec.id_prefix,
       fields: spec.fields.map(toSchemaFieldDescriptor),
+      is_custom_leaf_type: false,
+      leaf_type: spec.leaf_type,
+      type: CustomSchemaFragmentsSetRequestType.TenantFragment,
     };
 
     try {
@@ -78,8 +71,8 @@ async function ensureSessionStateSchema(event: FunctionInput): Promise<any> {
       });
       results.push({
         leaf_type: spec.leaf_type,
-        status: 'success',
         schema_id: response.data?.id,
+        status: 'success',
       });
     } catch (error: any) {
       hadError = true;
@@ -88,33 +81,31 @@ async function ensureSessionStateSchema(event: FunctionInput): Promise<any> {
         error?.response?.data || error?.message || error
       );
       results.push({
+        error: error?.message || 'Unknown error',
         leaf_type: spec.leaf_type,
         status: 'error',
-        error: error?.message || 'Unknown error',
       });
     }
   }
 
   if (!hadError) {
     return {
-      status: 'active',
       schemas: results,
+      status: 'active',
     };
   } else {
     const firstError = results.find((r) => r.status === 'error');
     return {
-      status: 'error',
-      reason: 'Failed to ensure session state schema',
       details: firstError?.error || 'Unknown error',
+      reason: 'Failed to ensure session state schema',
       schemas: results,
+      status: 'error',
     };
   }
 }
 
 export const run = async (events: FunctionInput[]): Promise<any> => {
-  const results = await Promise.all(
-    events.map(async (event) => ensureSessionStateSchema(event))
-  );
+  const results = await Promise.all(events.map(async (event) => ensureSessionStateSchema(event)));
 
   return results.length === 1 ? results[0] : results;
 };

@@ -1,9 +1,9 @@
 version: "2"
-name: "slack-ai-integration"
+name: "Slack Surface"
 description: "DevRev snap-in that integrates Slack with DevRev AI Agents. Receives messages from Slack, processes them through AI Agents, and sends responses back."
 
 service_account:
-  display_name: Slack AI Integration Bot
+  display_name: Slack Surface Bot
   scopes:
     self:
       - scope: dev_user:read
@@ -12,15 +12,15 @@ service_account:
       - scope: ai_agent:execute
         optional: false
         reason: "Fallback path: when no DevU is resolvable for the Slack sender, the SA token calls /internal/ai-agents.events.execute-async directly to run the AI Agent."
-      - scope: conversation:write
-        optional: false
-        reason: "Create a DevRev support conversation (sdk.conversationsCreate) and append the user's message as a timeline entry (sdk.timelineEntriesCreate) so the AI Agent has org context for data queries."
       - scope: tenant_fragment:write
         optional: false
-        reason: "Activate hook calls /schemas.custom-set with type=TenantFragment to create/update the slack_ai_session custom-leaf-type schema used to persist Slack conversation references."
-      - scope: custom_object:slack_ai_session:all
+        reason: "Activate hook calls /schemas.custom-set with type=TenantFragment to attach Slack session fields to the built-in conversation leaf type."
+      - scope: conversation:read
         optional: false
-        reason: "Full CRUD on slack_ai_session records — per-thread session objects holding the Slack channel/thread routing metadata needed to deliver AI Agent responses back to Slack."
+        reason: "List/get DevRev conversations to look up the active Slack ↔ DevRev session by conversation_key + status."
+      - scope: conversation:write
+        optional: false
+        reason: "Create/update/delete conversations as the persistent backing store for Slack ↔ DevRev AI sessions, and append timeline entries mirroring user queries and AI Agent responses."
     impersonate:
       - act_as: all_devusers
         scopes:
@@ -50,7 +50,7 @@ inputs:
       field_type: int
       is_required: false
       default_value: 480
-      description: Minutes of user inactivity before a session is considered idle-expired (default 480 = 8h). Used to populate expires_at_ms on each persisted slack_ai_session record.
+      description: Minutes of user inactivity before a session is considered idle-expired (default 480 = 8h). At this point the user is told their session has expired; the conversation is kept until the absolute timeout passes.
       ui:
         display_name: Session idle timeout (minutes)
 
@@ -58,7 +58,7 @@ inputs:
       field_type: int
       is_required: false
       default_value: 24
-      description: Absolute lifetime of a session in hours (default 24). Used to populate hard_expires_at_ms — records past this point should be considered safe to garbage-collect.
+      description: Absolute lifetime of a session in hours (default 24). Conversations are deleted from DevRev after this elapses, regardless of activity.
       ui:
         display_name: Session absolute timeout (hours)
 
@@ -163,10 +163,9 @@ event_sources:
       config:
         event_types:
           - ai_agent_response
-          - timeline_entry_created
 
     - name: session-gc-timer
-      description: Cron-driven periodic sweeper for slack_ai_session records.
+      description: Cron-driven periodic sweeper for Slack session conversations.
       display_name: Session GC Timer
       type: timer-events
       config:
@@ -182,10 +181,10 @@ functions:
     description: Handles async responses from AI Agents and sends them back to Slack.
 
   - name: ensure_session_state_schema
-    description: Creates or updates the slack_ai_session custom object schema used to persist Slack conversation references.
+    description: Creates or updates the tenant-fragment schema that attaches Slack session fields to the built-in conversation leaf type.
 
   - name: session_gc
-    description: Periodic sweeper. Marks idle-expired sessions and deletes records past the absolute timeout.
+    description: Periodic sweeper. Marks idle-expired sessions and deletes conversations past the absolute timeout.
 
 hooks:
   - type: activate
@@ -204,7 +203,6 @@ automations:
     source: ai-agent-events
     event_types:
       - ai_agent_response
-      - timeline_entry_created
     function: ai_response_handler
 
   - name: run-session-gc

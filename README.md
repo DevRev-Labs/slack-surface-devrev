@@ -1,4 +1,4 @@
-# Slack AI Integration Snap-in
+# Slack Surface Snap-in
 
 A DevRev snap-in that integrates Slack with DevRev AI Agents. Receive messages from Slack, process them through AI Agents, and send intelligent responses back to your workspace.
 

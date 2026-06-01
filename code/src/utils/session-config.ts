@@ -6,18 +6,21 @@
  * so callers can do simple `Date.now() + ttl` math.
  */
 
-export const SESSION_LEAF_TYPE = 'slack_ai_session';
-export const SESSION_LEAF_TYPE_ID_PREFIX = 'SLSES';
+// Built-in DevRev leaf type that backs the session record. Sessions live as
+// `conversation` objects with the Slack session fields attached as custom
+// fields, rather than as a bespoke custom-leaf-type.
+export const SESSION_LEAF_TYPE = 'conversation';
+
 export const SESSION_LEAF_TYPE_DESCRIPTION =
-  'Persistent record of a Slack ↔ DevRev AI Agent session, including identity, expiry and audit fields.';
+  'Custom fields on conversation that capture Slack ↔ DevRev AI Agent session identity, expiry and audit data.';
 
 export interface SessionTimingConfig {
   idleTtlMs: number;
   absoluteTtlMs: number;
 }
 
-const DEFAULT_IDLE_TTL_MIN = 8 * 60;       // 8 hours
-const DEFAULT_ABSOLUTE_TTL_HOURS = 24;     // 24 hours
+const DEFAULT_IDLE_TTL_MIN = 8 * 60;
+const DEFAULT_ABSOLUTE_TTL_HOURS = 24;
 
 function readNumber(value: unknown, fallback: number): number {
   if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
@@ -33,7 +36,7 @@ export function readSessionTimingConfig(globalValues: Record<string, any> = {}):
   const absHours = readNumber(globalValues['session_absolute_timeout_hours'], DEFAULT_ABSOLUTE_TTL_HOURS);
 
   return {
-    idleTtlMs: idleMin * 60 * 1000,
     absoluteTtlMs: absHours * 60 * 60 * 1000,
+    idleTtlMs: idleMin * 60 * 1000,
   };
 }
