@@ -10,6 +10,7 @@
 
 import { FunctionInput } from '../../types';
 import { ConversationReference } from '../../utils/conversation-store';
+import { formatAgentResponseForSlack } from '../../utils/format-text';
 import { readSessionTimingConfig } from '../../utils/session-config';
 import {
   getSessionByConversationId,
@@ -302,7 +303,7 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
   }
 
   try {
-    const formattedResponse = formatForSlack(responseText);
+    const formattedResponse = formatAgentResponseForSlack(responseText);
     console.log(
       `[${requestId}] [AI_RESP] Response from agent: "${responseText.substring(0, 200)}${
         responseText.length > 200 ? '...' : ''
@@ -331,98 +332,6 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
       status: 'error',
     };
   }
-}
-
-/**
- * Convert standard markdown to Slack mrkdwn format.
- */
-function toSlackMarkdown(text: string): string {
-  return text
-    .replace(/\*\*(.+?)\*\*/g, '*$1*')
-    .replace(/~~(.+?)~~/g, '~$1~')
-    .replace(/^#{1,6}\s+(.+)$/gm, '*$1*')
-    .replace(/^\s*[-*]\s+/gm, '• ')
-    .replace(/\[(.+?)\]\((.+?)\)/g, '<$2|$1>');
-}
-
-/**
- * Format an AI agent response for clean Slack display.
- * - Strips raw DevRev DON identifiers
- * - Converts markdown tables to plain text
- * - Converts markdown to Slack mrkdwn
- */
-function formatForSlack(text: string): string {
-  let formatted = text;
-
-  // Remove DONs wrapped in [<don:...>] (with angle brackets)
-  formatted = formatted.replace(/\s*\[<don:[^\]]+>\]/g, '');
-
-  // Remove DONs wrapped in [don:...] (without angle brackets)
-  formatted = formatted.replace(/\s*\[don:[^\]]+\]/g, '');
-
-  // Remove bare inline DONs
-  formatted = formatted.replace(/\bdon:[a-z0-9:/_-]+/g, '');
-
-  // Convert markdown tables to readable plain text
-  formatted = convertTableToText(formatted);
-
-  // Clean up leftover empty parens and extra spaces
-  formatted = formatted.replace(/\(\s*\)/g, '');
-  formatted = formatted.replace(/  +/g, ' ');
-  formatted = formatted.trim();
-
-  return toSlackMarkdown(formatted);
-}
-
-/**
- * Convert a markdown table into a numbered list for Slack.
- */
-function convertTableToText(text: string): string {
-  const lines = text.split('\n');
-  const result: string[] = [];
-  let headers: string[] = [];
-  let inTable = false;
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith('|')) {
-      if (inTable) inTable = false;
-      result.push(line);
-      continue;
-    }
-
-    const cells = trimmed
-      .split('|')
-      .map((c) => c.trim())
-      .filter((c) => c.length > 0);
-
-    if (cells.every((c) => /^[-:]+$/.test(c))) {
-      inTable = true;
-      continue;
-    }
-
-    if (!inTable) {
-      headers = cells;
-      inTable = true;
-      continue;
-    }
-
-    if (headers.length > 0) {
-      const parts = cells
-        .map((cell, i) => {
-          const header = headers[i] || '';
-          if (/^#$|^no\.?$|^index$/i.test(header)) return null;
-          if (!cell || cell === '-') return null;
-          return header ? `${header}: ${cell}` : cell;
-        })
-        .filter(Boolean);
-      result.push(`• ${parts.join(' | ')}`);
-    } else {
-      result.push(`• ${cells.join(' | ')}`);
-    }
-  }
-
-  return result.join('\n');
 }
 
 /**
