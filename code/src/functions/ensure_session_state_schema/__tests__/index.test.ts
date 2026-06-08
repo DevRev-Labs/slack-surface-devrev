@@ -1,5 +1,5 @@
-import { run } from '../index';
 import { FunctionInput } from '../../../types';
+import { run } from '../index';
 
 const mockCustomSchemaFragmentsSet = jest.fn();
 let mockSetupBeta: jest.Mock;
@@ -18,33 +18,33 @@ beforeEach(() => {
 
 describe('ensure_session_state_schema', () => {
   const activateEvent: FunctionInput = {
-    payload: {},
+    context: {
+      dev_oid: 'dev-1',
+      secrets: {
+        service_account_token: 'token-1',
+      },
+      service_account_id: 'service-1',
+      snap_in_id: 'snap-1',
+      snap_in_version_id: 'version-1',
+      source_id: 'source-1',
+    },
     execution_metadata: {
-      request_id: 'req-activate',
       devrev_endpoint: 'https://api.devrev.ai',
       event_type: 'hook:snap_in_activate',
       function_name: 'ensure_session_state_schema',
+      request_id: 'req-activate',
     },
     input_data: {
+      event_sources: {},
       global_values: {
         ai_agent_id: 'agent-1',
       },
-      event_sources: {},
       keyrings: {
         slack_bot_token: 'xoxb-test',
         slack_signing_secret: 'shh',
       },
     },
-    context: {
-      dev_oid: 'dev-1',
-      source_id: 'source-1',
-      snap_in_id: 'snap-1',
-      snap_in_version_id: 'version-1',
-      service_account_id: 'service-1',
-      secrets: {
-        service_account_token: 'token-1',
-      },
-    },
+    payload: {},
   };
 
   beforeEach(() => {
@@ -102,8 +102,8 @@ describe('ensure_session_state_schema', () => {
     }
     expect(result).toEqual(
       expect.objectContaining({
-        status: 'active',
         schemas: expect.any(Array),
+        status: 'active',
       })
     );
   });

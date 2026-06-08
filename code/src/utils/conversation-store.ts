@@ -13,18 +13,18 @@
  * the session in DevRev.
  */
 export interface ConversationReference {
-  channel: string;        // Slack channel ID (e.g. "C0123456789")
-  channelName?: string;   // Human-readable channel/DM label
+  channel: string; // Slack channel ID (e.g. "C0123456789")
+  channelName?: string; // Human-readable channel/DM label
   conversationType?: string; // "channel", "im", "mpim" (Slack channel type)
-  userId: string;         // Slack user ID (e.g. "U0123456789")
-  userName?: string;      // Slack display name / real name
-  userEmail?: string;     // Resolved email address (when available)
-  threadTs?: string;      // Thread timestamp (for threaded conversations)
-  messageTs: string;      // Original message timestamp
-  teamId?: string;        // Slack workspace ID
-  botUserId?: string;     // The bot user ID that received the mention
-  devrevUserId?: string;  // Resolved DevRev user DON (when available)
-  timestamp: number;      // When this reference was created (epoch ms)
+  userId: string; // Slack user ID (e.g. "U0123456789")
+  userName?: string; // Slack display name / real name
+  userEmail?: string; // Resolved email address (when available)
+  threadTs?: string; // Thread timestamp (for threaded conversations)
+  messageTs: string; // Original message timestamp
+  teamId?: string; // Slack workspace ID
+  botUserId?: string; // The bot user ID that received the mention
+  devrevUserId?: string; // Resolved DevRev user DON (when available)
+  timestamp: number; // When this reference was created (epoch ms)
   tempMessageTs?: string; // Temporary "Searching..." message timestamp (for progress updates)
 }
 
@@ -36,11 +36,11 @@ export function extractConversationReference(event: any): ConversationReference 
     channel: event.channel || '',
     channelName: event.channel_name || undefined,
     conversationType: event.channel_type || undefined,
-    userId: event.user || '',
-    threadTs: event.thread_ts,
     messageTs: event.ts || '',
     teamId: event.team,
+    threadTs: event.thread_ts,
     timestamp: Date.now(),
+    userId: event.user || '',
   };
 }
 

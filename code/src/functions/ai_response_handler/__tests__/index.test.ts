@@ -1,8 +1,8 @@
-import { run } from '../index';
-import * as sessionStore from '../../../utils/session-store';
-import * as slackClient from '../../../utils/slack-client';
 import { FunctionInput } from '../../../types';
+import * as sessionStore from '../../../utils/session-store';
 import { SessionRecord } from '../../../utils/session-store';
+import * as slackClient from '../../../utils/slack-client';
+import { run } from '../index';
 
 jest.mock('../../../utils/session-store');
 jest.mock('../../../utils/slack-client');
@@ -15,72 +15,72 @@ const mockedSlackClient = slackClient as jest.Mocked<typeof slackClient>;
 
 function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {
-    objectId: 'co-1',
-    sessionId: 'uuid-resp',
-    conversationKey: 'ck-1',
+    botUserId: 'UBOT00000',
     channel: 'C0123456789',
     channelName: 'general',
+    conversationKey: 'ck-1',
     conversationType: 'channel',
-    threadTs: '1705315800.000100',
+    createdAt: Date.now(),
+    devrevUserId: 'dev-user-123',
+    endReason: '',
+    expiresAt: Date.now() + 60_000,
+    feedbackRating: 0,
+    feedbackSubmittedAt: 0,
+    feedbackText: '',
+    generation: 0,
+    hardExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+    lastDeliveredTurn: 0,
+    lastUsedAt: Date.now(),
+    messageCount: 1,
     messageTs: '1705315800.000100',
+    objectId: 'co-1',
+    previousSessionId: '',
+    sessionId: 'uuid-resp',
+    status: 'active',
     teamId: 'T0123456789',
+    tempMessageTs: '',
+    threadTs: '1705315800.000100',
+    userEmail: 'alice@example.com',
     userId: 'U0123456789',
     userName: 'Alice',
-    userEmail: 'alice@example.com',
-    botUserId: 'UBOT00000',
-    devrevUserId: 'dev-user-123',
-    tempMessageTs: '',
-    status: 'active',
-    generation: 0,
-    previousSessionId: '',
-    endReason: '',
-    messageCount: 1,
-    createdAt: Date.now(),
-    lastUsedAt: Date.now(),
-    expiresAt: Date.now() + 60_000,
-    hardExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
-    feedbackRating: 0,
-    feedbackText: '',
-    feedbackSubmittedAt: 0,
-    lastDeliveredTurn: 0,
     ...overrides,
   };
 }
 
 describe('ai_response_handler', () => {
   const mockEvent: FunctionInput = {
-    payload: {
-      client_metadata: {
-        session_id: 'uuid-resp',
-        slack_bot_token: 'xoxb-test-token',
-      },
-      text: 'AI response content',
+    context: {
+      dev_oid: 'dev-1',
+      secrets: { service_account_token: 'token-1' },
+      service_account_id: 'svc-1',
+      snap_in_id: 'snap-1',
+      snap_in_version_id: 'ver-1',
+      source_id: 'source-1',
     },
     execution_metadata: {
-      request_id: 'req-2',
       devrev_endpoint: 'https://api.devrev.ai',
-      function_name: 'ai_response_handler',
       event_type: 'ai_agent_response',
+      function_name: 'ai_response_handler',
+      request_id: 'req-2',
     },
     input_data: {
-      global_values: {
-        ai_agent_id: 'agent-1',
-      },
       event_sources: {
         'ai-agent-events': 'event-source-id-456',
+      },
+      global_values: {
+        ai_agent_id: 'agent-1',
       },
       keyrings: {
         slack_bot_token: 'xoxb-test-token',
         slack_signing_secret: 'test-signing-secret',
       },
     },
-    context: {
-      dev_oid: 'dev-1',
-      source_id: 'source-1',
-      snap_in_id: 'snap-1',
-      snap_in_version_id: 'ver-1',
-      service_account_id: 'svc-1',
-      secrets: { service_account_token: 'token-1' },
+    payload: {
+      client_metadata: {
+        session_id: 'uuid-resp',
+        slack_bot_token: 'xoxb-test-token',
+      },
+      text: 'AI response content',
     },
   };
 
@@ -92,14 +92,14 @@ describe('ai_response_handler', () => {
     mockedSessionStore.recordToConversationReference.mockImplementation((record) => ({
       channel: record.channel,
       channelName: record.channelName || undefined,
-      userId: record.userId,
-      userName: record.userName || undefined,
-      userEmail: record.userEmail || undefined,
-      threadTs: record.threadTs || undefined,
       messageTs: record.messageTs,
       teamId: record.teamId || undefined,
       tempMessageTs: record.tempMessageTs || undefined,
+      threadTs: record.threadTs || undefined,
       timestamp: record.createdAt,
+      userEmail: record.userEmail || undefined,
+      userId: record.userId,
+      userName: record.userName || undefined,
     }));
 
     mockedSlackClient.sendMessage.mockResolvedValue('new-message-ts');
@@ -108,9 +108,7 @@ describe('ai_response_handler', () => {
   });
 
   test('marks turn as delivered after sending final response (dedup stamp)', async () => {
-    mockedSessionStore.getSessionById.mockResolvedValue(
-      makeRecord({ messageCount: 5, lastDeliveredTurn: 4 })
-    );
+    mockedSessionStore.getSessionById.mockResolvedValue(makeRecord({ lastDeliveredTurn: 4, messageCount: 5 }));
 
     await run([mockEvent]);
 
@@ -122,9 +120,7 @@ describe('ai_response_handler', () => {
   });
 
   test('drops duplicate `message` event for already-delivered turn', async () => {
-    mockedSessionStore.getSessionById.mockResolvedValue(
-      makeRecord({ messageCount: 5, lastDeliveredTurn: 5 })
-    );
+    mockedSessionStore.getSessionById.mockResolvedValue(makeRecord({ lastDeliveredTurn: 5, messageCount: 5 }));
 
     const result = await run([mockEvent]);
 
@@ -133,9 +129,7 @@ describe('ai_response_handler', () => {
   });
 
   test('drops late `progress` event for already-delivered turn', async () => {
-    mockedSessionStore.getSessionById.mockResolvedValue(
-      makeRecord({ messageCount: 5, lastDeliveredTurn: 5 })
-    );
+    mockedSessionStore.getSessionById.mockResolvedValue(makeRecord({ lastDeliveredTurn: 5, messageCount: 5 }));
     const lateProgressEvent = {
       ...mockEvent,
       payload: {
@@ -171,16 +165,14 @@ describe('ai_response_handler', () => {
       '1705315800.000100'
     );
     expect(result).toEqual({
-      status: 'success',
       message: 'AI response sent to Slack',
       session_id: 'uuid-resp',
+      status: 'success',
     });
   });
 
   test('updates temp message on progress events', async () => {
-    mockedSessionStore.getSessionById.mockResolvedValue(
-      makeRecord({ tempMessageTs: '1705315801.000200' })
-    );
+    mockedSessionStore.getSessionById.mockResolvedValue(makeRecord({ tempMessageTs: '1705315801.000200' }));
     const progressEvent = {
       ...mockEvent,
       payload: {
@@ -251,17 +243,11 @@ describe('ai_response_handler', () => {
   });
 
   test('deletes temp message and patches session before sending final response', async () => {
-    mockedSessionStore.getSessionById.mockResolvedValue(
-      makeRecord({ tempMessageTs: '1705315801.000200' })
-    );
+    mockedSessionStore.getSessionById.mockResolvedValue(makeRecord({ tempMessageTs: '1705315801.000200' }));
 
     await run([mockEvent]);
 
-    expect(mockedSlackClient.deleteMessage).toHaveBeenCalledWith(
-      'C0123456789',
-      '1705315801.000200',
-      'xoxb-test-token'
-    );
+    expect(mockedSlackClient.deleteMessage).toHaveBeenCalledWith('C0123456789', '1705315801.000200', 'xoxb-test-token');
     expect(mockedSessionStore.patchSession).toHaveBeenCalledWith(
       expect.anything(),
       expect.anything(),
@@ -285,9 +271,9 @@ describe('ai_response_handler', () => {
           ...mockEvent.payload.client_metadata,
           conversation_reference: {
             channel: 'C-FALLBACK',
-            userId: 'U-FALLBACK',
             messageTs: 't-fallback',
             timestamp: 1700000000000,
+            userId: 'U-FALLBACK',
           },
         },
       },
@@ -311,25 +297,25 @@ describe('ai_response_handler', () => {
     };
     const result = await run([event]);
     expect(result).toEqual({
-      status: 'error',
       reason: 'Conversation reference not found',
+      status: 'error',
     });
   });
 
   test('returns error if Slack Bot Token is not configured', async () => {
     const event = {
       ...mockEvent,
+      input_data: { ...mockEvent.input_data, keyrings: {} },
       payload: {
         client_metadata: { session_id: 'uuid-resp' }, // No slack_bot_token
         text: 'AI response content',
       },
-      input_data: { ...mockEvent.input_data, keyrings: {} },
     };
 
     const result = await run([event]);
     expect(result).toEqual({
-      status: 'error',
       reason: 'Slack Bot Token not configured',
+      status: 'error',
     });
   });
 
@@ -377,5 +363,4 @@ describe('ai_response_handler', () => {
     expect(result.status).toBe('ignored');
     expect(result.reason).toBe('Suggestions event');
   });
-
 });

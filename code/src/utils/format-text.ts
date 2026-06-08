@@ -29,30 +29,48 @@
  */
 
 const OBJECT_NAME_TO_PREFIX: Record<string, string> = {
-  // Parts
-  product: 'PROD',
-  feature: 'FEAT',
+  account: 'ACC',
+
+  article: 'ART',
+
   capability: 'CAPL',
-  enhancement: 'ENH',
-  runnable: 'RUNN',
-  linkable: 'LNKB',
-  // Works
-  ticket: 'TKT',
-  issue: 'ISS',
-  opportunity: 'OPP',
+
   // Other core objects
   conversation: 'CONV',
-  incident: 'INC',
-  article: 'ART',
+
+  devo: 'DEVO',
+
   // Identity
   devu: 'DEVU',
-  revu: 'REVU',
-  svcacc: 'SVCACC',
-  sysu: 'SYSU',
-  devo: 'DEVO',
-  revo: 'REVO',
-  account: 'ACC',
+
+  enhancement: 'ENH',
+
+  feature: 'FEAT',
+
   group: 'group',
+
+  incident: 'INC',
+
+  issue: 'ISS',
+
+  linkable: 'LNKB',
+
+  opportunity: 'OPP',
+
+  // Parts
+  product: 'PROD',
+
+  revo: 'REVO',
+
+  revu: 'REVU',
+
+  runnable: 'RUNN',
+
+  svcacc: 'SVCACC',
+
+  sysu: 'SYSU',
+  // Works
+  ticket: 'TKT',
 };
 
 // Object-name segments may include underscores (e.g. `custom_object`), so
@@ -60,10 +78,7 @@ const OBJECT_NAME_TO_PREFIX: Record<string, string> = {
 const DON_RAW = String.raw`don:[a-z][a-z0-9_-]*:[a-z][a-z0-9_-]*(?::[a-z][a-z0-9_-]*\/[a-zA-Z0-9_]+)+`;
 const DON_REGEX = new RegExp(DON_RAW, 'gi');
 
-const MD_LINK_TO_DON = new RegExp(
-  String.raw`!?\[([^\]]+)\]\(\s*<?(${DON_RAW})>?\s*\)`,
-  'gi'
-);
+const MD_LINK_TO_DON = new RegExp(String.raw`!?\[([^\]]+)\]\(\s*<?(${DON_RAW})>?\s*\)`, 'gi');
 const HTML_ANCHOR_TO_DON = new RegExp(
   String.raw`<a\b[^>]*href\s*=\s*(?:"|')(${DON_RAW})(?:"|')[^>]*>([\s\S]*?)<\/a>`,
   'gi'
@@ -122,9 +137,7 @@ export function formatAgentResponseForSlack(text: string | undefined | null): st
   body = body.replace(MD_LINK_TO_DON, (_match, label: string) => resolveLinkLabel(label));
 
   // 2. DON-targeted HTML anchor → resolved label as plain text.
-  body = body.replace(HTML_ANCHOR_TO_DON, (_match, _href: string, label: string) =>
-    resolveLinkLabel(label)
-  );
+  body = body.replace(HTML_ANCHOR_TO_DON, (_match, _href: string, label: string) => resolveLinkLabel(label));
 
   // 3. Bracketed-with-angles `[<don:…>]` → display id.
   body = body.replace(new RegExp(String.raw`\[<(${DON_RAW})>\]`, 'gi'), (_match, donId: string) => {

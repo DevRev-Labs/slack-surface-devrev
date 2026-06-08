@@ -24,42 +24,42 @@ describe('formatAgentResponseForSlack', () => {
     expect(formatAgentResponseForSlack('See don:core:dvrv-us-1:devo/x:article/1 for steps.')).toBe(
       'See ART-1 for steps.'
     );
-    expect(
-      formatAgentResponseForSlack('Tracking don:core:dvrv-us-1:devo/x:enhancement/9 here.')
-    ).toBe('Tracking ENH-9 here.');
+    expect(formatAgentResponseForSlack('Tracking don:core:dvrv-us-1:devo/x:enhancement/9 here.')).toBe(
+      'Tracking ENH-9 here.'
+    );
   });
 
   test('falls back to <object-name>-<value> for object kinds without a hard-coded prefix', () => {
-    expect(
-      formatAgentResponseForSlack('Linked don:core:dvrv-us-1:devo/x:custom_object/abc here')
-    ).toBe('Linked custom_object-abc here');
+    expect(formatAgentResponseForSlack('Linked don:core:dvrv-us-1:devo/x:custom_object/abc here')).toBe(
+      'Linked custom_object-abc here'
+    );
     expect(formatAgentResponseForSlack('Linked don:core:dvrv-us-1:devo/x:meeting/m42 here')).toBe(
       'Linked meeting-m42 here'
     );
   });
 
   test('resolves an identity DON (devu, group)', () => {
-    expect(
-      formatAgentResponseForSlack('Owner don:identity:dvrv-us-1:devo/x:devu/1 reviewed it.')
-    ).toBe('Owner DEVU-1 reviewed it.');
-    expect(
-      formatAgentResponseForSlack('Group don:identity:dvrv-us-1:devo/x:group/default10 has access.')
-    ).toBe('Group group-default10 has access.');
+    expect(formatAgentResponseForSlack('Owner don:identity:dvrv-us-1:devo/x:devu/1 reviewed it.')).toBe(
+      'Owner DEVU-1 reviewed it.'
+    );
+    expect(formatAgentResponseForSlack('Group don:identity:dvrv-us-1:devo/x:group/default10 has access.')).toBe(
+      'Group group-default10 has access.'
+    );
   });
 
   test('resolves bracketed DONs (with and without angles)', () => {
-    expect(
-      formatAgentResponseForSlack('See [<don:core:dvrv-us-1:devo/x:ticket/42>] for details.')
-    ).toBe('See TKT-42 for details.');
-    expect(
-      formatAgentResponseForSlack('See [don:core:dvrv-us-1:devo/x:ticket/42] for details.')
-    ).toBe('See TKT-42 for details.');
+    expect(formatAgentResponseForSlack('See [<don:core:dvrv-us-1:devo/x:ticket/42>] for details.')).toBe(
+      'See TKT-42 for details.'
+    );
+    expect(formatAgentResponseForSlack('See [don:core:dvrv-us-1:devo/x:ticket/42] for details.')).toBe(
+      'See TKT-42 for details.'
+    );
   });
 
   test('resolves angle-bracketed DON mention', () => {
-    expect(
-      formatAgentResponseForSlack('Owner <don:identity:dvrv-us-1:devo/x:devu/1> reviewed.')
-    ).toBe('Owner DEVU-1 reviewed.');
+    expect(formatAgentResponseForSlack('Owner <don:identity:dvrv-us-1:devo/x:devu/1> reviewed.')).toBe(
+      'Owner DEVU-1 reviewed.'
+    );
   });
 
   // -------------------------------------------------------------------------
@@ -67,8 +67,7 @@ describe('formatAgentResponseForSlack', () => {
   // -------------------------------------------------------------------------
 
   test('flattens [DON-label](don:DON) → resolved display id', () => {
-    const input =
-      'See [don:core:dvrv-us-1:devo/x:ticket/42](don:core:dvrv-us-1:devo/x:ticket/42) for details.';
+    const input = 'See [don:core:dvrv-us-1:devo/x:ticket/42](don:core:dvrv-us-1:devo/x:ticket/42) for details.';
     expect(formatAgentResponseForSlack(input)).toBe('See TKT-42 for details.');
   });
 
@@ -83,8 +82,7 @@ describe('formatAgentResponseForSlack', () => {
   });
 
   test('iteratively strips overlapping HTML tags inside an anchor label', () => {
-    const input =
-      '<a href="don:identity:dvrv-us-1:devo/x:devu/1">hi <scr<script>ipt>alert(1)</script></a>';
+    const input = '<a href="don:identity:dvrv-us-1:devo/x:devu/1">hi <scr<script>ipt>alert(1)</script></a>';
     const out = formatAgentResponseForSlack(input);
     expect(out).not.toMatch(/<script/i);
     expect(out).not.toMatch(/<\/?script/i);
@@ -105,16 +103,12 @@ describe('formatAgentResponseForSlack', () => {
 
   test('converts heading lines to bold lines', () => {
     expect(formatAgentResponseForSlack('# Heading\nbody')).toBe('*Heading*\nbody');
-    expect(formatAgentResponseForSlack('### Smaller heading\nbody')).toBe(
-      '*Smaller heading*\nbody'
-    );
+    expect(formatAgentResponseForSlack('### Smaller heading\nbody')).toBe('*Smaller heading*\nbody');
   });
 
   test('converts markdown bullets to • bullets', () => {
     const input = ['Items:', '- one', '- two', '* three'].join('\n');
-    expect(formatAgentResponseForSlack(input)).toBe(
-      ['Items:', '• one', '• two', '• three'].join('\n')
-    );
+    expect(formatAgentResponseForSlack(input)).toBe(['Items:', '• one', '• two', '• three'].join('\n'));
   });
 
   test('converts http(s) markdown links to <url|label>', () => {
@@ -124,9 +118,7 @@ describe('formatAgentResponseForSlack', () => {
   });
 
   test('does not corrupt single-asterisk text (italic) when converting bold', () => {
-    expect(formatAgentResponseForSlack('Mix of **bold** and *italic*.')).toBe(
-      'Mix of *bold* and *italic*.'
-    );
+    expect(formatAgentResponseForSlack('Mix of **bold** and *italic*.')).toBe('Mix of *bold* and *italic*.');
   });
 
   // -------------------------------------------------------------------------
@@ -158,9 +150,7 @@ describe('formatAgentResponseForSlack', () => {
     ].join('\n');
     const out = formatAgentResponseForSlack(input);
     expect(out).not.toMatch(/don:/);
-    expect(out).toContain(
-      '• Name: Verified Customers | Description: Group of all verified customers. group-default10'
-    );
+    expect(out).toContain('• Name: Verified Customers | Description: Group of all verified customers. group-default10');
     expect(out).toContain('• Name: Support | Description: Group for support. group-default4');
   });
 

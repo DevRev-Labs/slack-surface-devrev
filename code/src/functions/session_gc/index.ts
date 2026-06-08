@@ -19,8 +19,8 @@ import {
   endSession,
   listHardExpiredSessions,
   listIdleExpiredSessions,
-  type SessionRecord,
-  type StoreConfig,
+  SessionRecord,
+  StoreConfig,
 } from '../../utils/session-store';
 
 async function runGc(event: FunctionInput): Promise<any> {
@@ -29,8 +29,8 @@ async function runGc(event: FunctionInput): Promise<any> {
   const eventKey = (event.payload as any)?.event_key || (event.payload as any)?.metadata?.event_key || '';
 
   console.log(`[${requestId}] [gc] tick received`, {
-    event_type: eventType,
     event_key: eventKey,
+    event_type: eventType,
     received_at: new Date().toISOString(),
   });
 
@@ -41,13 +41,13 @@ async function runGc(event: FunctionInput): Promise<any> {
 
   if (!config.devrevEndpoint || !config.serviceAccountToken) {
     console.warn(`[${requestId}] [gc] missing devrev config — endpoint or service account token absent`);
-    return { status: 'error', reason: 'missing devrev config' };
+    return { reason: 'missing devrev config', status: 'error' };
   }
 
   const now = Date.now();
   console.log(`[${requestId}] [gc] sweep starting`, {
-    now_iso: new Date(now).toISOString(),
     devrev_endpoint: config.devrevEndpoint,
+    now_iso: new Date(now).toISOString(),
   });
 
   // 1. Idle sweep — mark active-but-idle sessions expired.
@@ -64,16 +64,13 @@ async function runGc(event: FunctionInput): Promise<any> {
     try {
       await endSession(config, record, 'idle_timeout');
       console.log(`[${requestId}] [gc] marked idle-expired`, {
+        expires_at: new Date(record.expiresAt).toISOString(),
+        last_used_at: new Date(record.lastUsedAt).toISOString(),
         object_id: record.objectId,
         session_id: record.sessionId,
-        last_used_at: new Date(record.lastUsedAt).toISOString(),
-        expires_at: new Date(record.expiresAt).toISOString(),
       });
     } catch (error: any) {
-      console.warn(
-        `[${requestId}] [gc] endSession(idle) failed for ${record.sessionId}:`,
-        error?.message || error
-      );
+      console.warn(`[${requestId}] [gc] endSession(idle) failed for ${record.sessionId}:`, error?.message || error);
     }
   }
 
@@ -97,25 +94,25 @@ async function runGc(event: FunctionInput): Promise<any> {
     }
     await deleteSession(config, record);
     console.log(`[${requestId}] [gc] deleted hard-expired session`, {
+      end_reason: record.endReason,
+      hard_expires_at: new Date(record.hardExpiresAt).toISOString(),
       object_id: record.objectId,
       session_id: record.sessionId,
-      hard_expires_at: new Date(record.hardExpiresAt).toISOString(),
       status: record.status,
-      end_reason: record.endReason,
     });
     sessionsDeleted += 1;
   }
 
   console.log(`[${requestId}] [gc] sweep complete`, {
+    duration_ms: Date.now() - now,
     idle_marked: idleSessions.length,
     sessions_deleted: sessionsDeleted,
-    duration_ms: Date.now() - now,
   });
 
   return {
-    status: 'success',
     idle_marked: idleSessions.length,
     sessions_deleted: sessionsDeleted,
+    status: 'success',
   };
 }
 
@@ -126,8 +123,8 @@ export const run = async (events: FunctionInput[]): Promise<any> => {
       runGc(event).catch((error: any) => {
         console.error(`[gc] runGc threw:`, error?.message || error);
         return {
-          status: 'error',
           reason: error?.message || 'Unknown error',
+          status: 'error',
         };
       })
     )

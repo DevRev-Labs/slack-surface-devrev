@@ -58,6 +58,6 @@
     "@babel/runtime": "7.27.1",
     "@devrev/typescript-sdk": "1.1.60",
     "axios": "^1.13.4",
-    "protobufjs": "7.3.0"
+    "protobufjs": "^7.6.2"
   }
 }

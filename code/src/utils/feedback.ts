@@ -20,45 +20,10 @@ export const FEEDBACK_BLOCK_TEXT = 'feedback_text_block';
 export const FEEDBACK_ACTION_RATING = 'rating';
 export const FEEDBACK_ACTION_TEXT = 'comment';
 
-// Block-Kit action ids for the typed-text-triggered prompt buttons.
-export const ACTION_OPEN_FEEDBACK = 'feedback_open';
-export const ACTION_DISMISS_FEEDBACK_PROMPT = 'feedback_dismiss';
-
 // Slash command Slack delivers to the interactivity webhook. Configured
 // in the Slack app's "Slash Commands" page; mirrored here so the
 // dispatcher can reject other commands cleanly.
 export const FEEDBACK_SLASH_COMMAND = '/sda-feedback';
-
-// Phrases that trigger the in-message feedback prompt. Match is exact
-// (case-insensitive, punctuation-tolerant) on the cleaned message text
-// (i.e. after the bot mention is stripped). Slash-command form
-// (`/sda-feedback`) uses the slash-command path instead.
-const FEEDBACK_INTENT_PHRASES: ReadonlyArray<string> = [
-  'i want to give a feedback',
-  'i want to give feedback',
-  'i would like to give feedback',
-  'i would like to give a feedback',
-  'give feedback',
-  'leave feedback',
-  'submit feedback',
-];
-
-/**
- * True when the user's typed message expresses intent to leave feedback.
- * Used by slack_handler before invoking the AI Agent — when matched,
- * the handler short-circuits and posts the feedback button prompt.
- */
-export function isFeedbackIntent(message: string): boolean {
-  if (!message) return false;
-  const normalized = message
-    .toLowerCase()
-    .replace(/[^\w\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return FEEDBACK_INTENT_PHRASES.some(
-    (phrase) => normalized === phrase || normalized.startsWith(`${phrase} `)
-  );
-}
 
 export interface FeedbackContext {
   /**
@@ -72,110 +37,79 @@ export interface FeedbackContext {
   userId?: string;
 }
 
+// Centralised modal title — used across loading / form / error / thanks
+// states for visual continuity. Slack caps modal titles at 24 chars.
+const MODAL_TITLE = 'SDA Agent Feedback';
+
+// Block-Kit shapes are recursive and finely typed in @slack/types,
+// but we build literal objects here that get JSON-serialised — the
+// alternative (fully typing every nested Block Kit element) would
+// pull in @slack/types just for static check. We expose loose aliases
+// and silence the rule once.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type SlackView = any;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type SlackBlock = any;
+
 /**
  * The modal Slack opens when the user runs `/sda-feedback`. Rating is a
  * static_select 1-5; comment is an optional multiline plain_text_input.
  * Slack auto-renders Submit/Cancel buttons from the view's `submit`/
  * `close` fields — they don't need to be blocks.
  */
-export function buildFeedbackModal(ctx: FeedbackContext): any {
+export function buildFeedbackModal(ctx: FeedbackContext): SlackView {
   return {
-    type: 'modal',
-    callback_id: FEEDBACK_VIEW_CALLBACK,
-    private_metadata: encodeContext(ctx),
-    title: { type: 'plain_text', text: 'Share your feedback' },
-    submit: { type: 'plain_text', text: 'Submit' },
-    close: { type: 'plain_text', text: 'Cancel' },
     blocks: [
       {
+        text: {
+          text: 'Your feedback helps us improve the SDA Agent. It takes less than a minute.',
+          type: 'mrkdwn',
+        },
         type: 'section',
-        text: { type: 'mrkdwn', text: 'How would you rate this conversation?' },
       },
+      { type: 'divider' },
       {
-        type: 'input',
         block_id: FEEDBACK_BLOCK_RATING,
-        label: { type: 'plain_text', text: 'Rating (1 = poor, 5 = great)' },
         element: {
-          type: 'static_select',
           action_id: FEEDBACK_ACTION_RATING,
-          placeholder: { type: 'plain_text', text: 'Pick a rating' },
           options: [1, 2, 3, 4, 5].map((n) => ({
-            text: { type: 'plain_text', text: ratingLabel(n) },
+            text: { text: ratingLabel(n), type: 'plain_text' },
             value: String(n),
           })),
+          placeholder: { text: 'Select a rating', type: 'plain_text' },
+          type: 'static_select',
         },
+        label: { text: 'How would you rate this experience?', type: 'plain_text' },
+        type: 'input',
       },
       {
-        type: 'input',
         block_id: FEEDBACK_BLOCK_TEXT,
-        optional: true,
-        label: { type: 'plain_text', text: 'Tell us more (optional)' },
         element: {
-          type: 'plain_text_input',
           action_id: FEEDBACK_ACTION_TEXT,
-          multiline: true,
           max_length: 2000,
-          placeholder: { type: 'plain_text', text: 'What worked well? What could be better?' },
+          multiline: true,
+          placeholder: {
+            text: 'e.g. Accurate answers, but a bit slow on long queries.',
+            type: 'plain_text',
+          },
+          type: 'plain_text_input',
         },
+        hint: {
+          text: 'Optional. Share what worked well or what we could improve.',
+          type: 'plain_text',
+        },
+        label: { text: 'Additional comments', type: 'plain_text' },
+        optional: true,
+        type: 'input',
       },
     ],
+    callback_id: FEEDBACK_VIEW_CALLBACK,
+    close: { text: 'Cancel', type: 'plain_text' },
+    private_metadata: encodeContext(ctx),
+    submit: { text: 'Submit feedback', type: 'plain_text' },
+    title: { text: MODAL_TITLE, type: 'plain_text' },
+    type: 'modal',
   };
-}
-
-/**
- * Block-Kit message posted in-thread when the user types a feedback
- * intent ("I want to give a feedback"). Plain message events don't
- * carry a `trigger_id`, so we can't open a modal directly — we post
- * a button whose click WILL deliver a `trigger_id` to the interactivity
- * handler, which then opens the modal.
- *
- * The button's `value` carries the resolved session context so the
- * interactivity handler doesn't need a second DevRev round-trip.
- */
-export function buildFeedbackPromptBlocks(ctx: FeedbackContext): any[] {
-  return [
-    {
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: '*Share your feedback*\nWe would love to hear how this conversation went.',
-      },
-    },
-    {
-      type: 'actions',
-      block_id: 'feedback_prompt_actions',
-      elements: [
-        {
-          type: 'button',
-          action_id: ACTION_OPEN_FEEDBACK,
-          style: 'primary',
-          text: { type: 'plain_text', text: '📝 Give Feedback' },
-          value: encodeContext(ctx),
-        },
-        {
-          type: 'button',
-          action_id: ACTION_DISMISS_FEEDBACK_PROMPT,
-          text: { type: 'plain_text', text: 'Not now' },
-          value: encodeContext(ctx),
-        },
-      ],
-    },
-  ];
-}
-
-export const FEEDBACK_PROMPT_FALLBACK_TEXT =
-  'We would love your feedback on this conversation.';
-
-export function buildFeedbackDismissedBlocks(): any[] {
-  return [
-    {
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: '_Feedback skipped — let me know if you change your mind._',
-      },
-    },
-  ];
 }
 
 /**
@@ -187,18 +121,21 @@ export function buildFeedbackDismissedBlocks(): any[] {
  * (somehow) submits while it's still loading, our submit handler matches
  * and surfaces a proper error.
  */
-export function buildLoadingModal(): any {
+export function buildLoadingModal(): SlackView {
   return {
-    type: 'modal',
-    callback_id: FEEDBACK_VIEW_CALLBACK,
-    title: { type: 'plain_text', text: 'Share your feedback' },
-    close: { type: 'plain_text', text: 'Close' },
     blocks: [
       {
+        text: {
+          text: ':hourglass_flowing_sand: _Preparing the feedback form…_',
+          type: 'mrkdwn',
+        },
         type: 'section',
-        text: { type: 'mrkdwn', text: ':hourglass_flowing_sand: _Loading the feedback form…_' },
       },
     ],
+    callback_id: FEEDBACK_VIEW_CALLBACK,
+    close: { text: 'Close', type: 'plain_text' },
+    title: { text: MODAL_TITLE, type: 'plain_text' },
+    type: 'modal',
   };
 }
 
@@ -206,44 +143,71 @@ export function buildLoadingModal(): any {
  * Error modal shown via views.update when something goes wrong building
  * the real form (e.g. no active session, DevRev call failed).
  */
-export function buildErrorModal(message: string): any {
+export function buildErrorModal(message: string): SlackView {
   return {
-    type: 'modal',
+    blocks: [{ text: { text: message, type: 'mrkdwn' }, type: 'section' }],
     callback_id: FEEDBACK_VIEW_CALLBACK,
-    title: { type: 'plain_text', text: 'Share your feedback' },
-    close: { type: 'plain_text', text: 'Close' },
-    blocks: [{ type: 'section', text: { type: 'mrkdwn', text: message } }],
+    close: { text: 'Close', type: 'plain_text' },
+    title: { text: MODAL_TITLE, type: 'plain_text' },
+    type: 'modal',
   };
 }
 
 /**
- * Confirmation blocks posted in-thread after a successful submit.
+ * Modal view shown via `response_action: 'update'` after successful
+ * submit. Replaces the form contents in-place with a thank-you message
+ * — fully private, since modals are only ever rendered to the user
+ * who submitted.
  */
-export function buildFeedbackConfirmationBlocks(rating: number, comment: string): any[] {
+export function buildFeedbackThanksModal(rating: number, comment: string): SlackView {
   const stars = '★'.repeat(rating) + '☆'.repeat(Math.max(0, 5 - rating));
-  const lines = [`*Thanks for the feedback!*`, `Rating: ${stars} (${rating}/5)`];
+  const lines = ['*Thank you — your feedback has been recorded.*', `Rating: ${stars}  (${rating}/5)`];
   if (comment.trim()) {
-    lines.push(`> ${comment.trim().replace(/\n/g, '\n> ')}`);
+    lines.push('', '*Your comment*', `> ${comment.trim().replace(/\n/g, '\n> ')}`);
   }
-  return [{ type: 'section', text: { type: 'mrkdwn', text: lines.join('\n') } }];
+  lines.push('', '_We appreciate you taking the time to help us improve._');
+  return {
+    blocks: [{ text: { text: lines.join('\n'), type: 'mrkdwn' }, type: 'section' }],
+    callback_id: FEEDBACK_VIEW_CALLBACK,
+    close: { text: 'Close', type: 'plain_text' },
+    title: { text: MODAL_TITLE, type: 'plain_text' },
+    type: 'modal',
+  };
+}
+
+/**
+ * Confirmation blocks for the ephemeral thread-side note. Visible only
+ * to the submitter; just a brief breadcrumb that feedback was captured.
+ */
+export function buildFeedbackConfirmationBlocks(rating: number, _comment: string): SlackBlock[] {
+  const stars = '★'.repeat(rating) + '☆'.repeat(Math.max(0, 5 - rating));
+  return [
+    {
+      text: {
+        text: `*Thank you for your feedback.* Rating: ${stars}  (${rating}/5)`,
+        type: 'mrkdwn',
+      },
+      type: 'section',
+    },
+  ];
 }
 
 export function feedbackConfirmationFallbackText(rating: number): string {
-  return `Thanks for the feedback — recorded a ${rating}/5 rating on your session.`;
+  return `Feedback recorded — ${rating}/5 rating saved.`;
 }
 
 function ratingLabel(n: number): string {
   switch (n) {
     case 1:
-      return '1 — Poor';
+      return '★☆☆☆☆  (1) Poor';
     case 2:
-      return '2 — Fair';
+      return '★★☆☆☆  (2) Fair';
     case 3:
-      return '3 — Good';
+      return '★★★☆☆  (3) Good';
     case 4:
-      return '4 — Very good';
+      return '★★★★☆  (4) Very good';
     case 5:
-      return '5 — Excellent';
+      return '★★★★★  (5) Excellent';
     default:
       return String(n);
   }
@@ -255,8 +219,8 @@ function ratingLabel(n: number): string {
  */
 export function encodeContext(ctx: FeedbackContext): string {
   return JSON.stringify({
-    s: ctx.sessionId,
     c: ctx.channel,
+    s: ctx.sessionId,
     t: ctx.threadTs || '',
     u: ctx.userId || '',
   });
@@ -268,8 +232,8 @@ export function decodeContext(raw: string | undefined | null): FeedbackContext |
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object' || typeof parsed.s !== 'string') return null;
     return {
-      sessionId: parsed.s,
       channel: typeof parsed.c === 'string' ? parsed.c : '',
+      sessionId: parsed.s,
       threadTs: typeof parsed.t === 'string' && parsed.t ? parsed.t : undefined,
       userId: typeof parsed.u === 'string' && parsed.u ? parsed.u : undefined,
     };
