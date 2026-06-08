@@ -39,6 +39,10 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     lastUsedAt: Date.now(),
     expiresAt: Date.now() + 60_000,
     hardExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+    feedbackRating: 0,
+    feedbackText: '',
+    feedbackSubmittedAt: 0,
+    lastDeliveredTurn: 0,
     ...overrides,
   };
 }
@@ -101,6 +105,53 @@ describe('ai_response_handler', () => {
     mockedSlackClient.sendMessage.mockResolvedValue('new-message-ts');
     mockedSlackClient.updateMessage.mockResolvedValue(undefined);
     mockedSlackClient.deleteMessage.mockResolvedValue(undefined);
+  });
+
+  test('marks turn as delivered after sending final response (dedup stamp)', async () => {
+    mockedSessionStore.getSessionById.mockResolvedValue(
+      makeRecord({ messageCount: 5, lastDeliveredTurn: 4 })
+    );
+
+    await run([mockEvent]);
+
+    expect(mockedSessionStore.patchSession).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ messageCount: 5 }),
+      expect.objectContaining({ lastDeliveredTurn: 5 })
+    );
+  });
+
+  test('drops duplicate `message` event for already-delivered turn', async () => {
+    mockedSessionStore.getSessionById.mockResolvedValue(
+      makeRecord({ messageCount: 5, lastDeliveredTurn: 5 })
+    );
+
+    const result = await run([mockEvent]);
+
+    expect(result.status).toBe('ignored');
+    expect(mockedSlackClient.sendMessage).not.toHaveBeenCalled();
+  });
+
+  test('drops late `progress` event for already-delivered turn', async () => {
+    mockedSessionStore.getSessionById.mockResolvedValue(
+      makeRecord({ messageCount: 5, lastDeliveredTurn: 5 })
+    );
+    const lateProgressEvent = {
+      ...mockEvent,
+      payload: {
+        ...mockEvent.payload,
+        ai_agent_response: {
+          agent_response: 'progress',
+          progress: { progress_state: 'thinking' },
+        },
+      },
+    };
+
+    const result = await run([lateProgressEvent]);
+
+    expect(result.status).toBe('ignored');
+    expect(mockedSlackClient.sendMessage).not.toHaveBeenCalled();
+    expect(mockedSlackClient.updateMessage).not.toHaveBeenCalled();
   });
 
   test('processes final AI response and sends to Slack', async () => {

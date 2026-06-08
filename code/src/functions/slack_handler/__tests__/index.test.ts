@@ -67,6 +67,10 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     lastUsedAt: Date.now(),
     expiresAt: Date.now() + 60_000,
     hardExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+    feedbackRating: 0,
+    feedbackText: '',
+    feedbackSubmittedAt: 0,
+    lastDeliveredTurn: 0,
     ...overrides,
   };
 }
@@ -153,6 +157,7 @@ describe('slack_handler', () => {
     mockedSessionStore.isSessionExpired.mockReturnValue(null);
 
     mockedSlackClient.sendMessage.mockResolvedValue('1705315801.000200');
+    mockedSlackClient.sendBlocksMessage.mockResolvedValue('1705315802.000300');
     mockedSlackClient.removeBotMention.mockImplementation((text) =>
       text.replace(/<@[A-Z0-9]+>/gi, '').trim()
     );
@@ -224,6 +229,27 @@ describe('slack_handler', () => {
       expect.anything(),
       expect.anything()
     );
+  });
+
+  test('feedback intent posts a button prompt and skips the AI Agent', async () => {
+    mockedSlackClient.removeBotMention.mockReturnValue('I want to give a feedback');
+    mockedSessionStore.getActiveSession.mockResolvedValue(
+      makeRecord({ sessionId: 'uuid-current' })
+    );
+
+    const result = await run([mockEvent]);
+
+    // Block-Kit prompt posted in-thread; AI Agent NOT invoked.
+    expect(mockedSlackClient.sendBlocksMessage).toHaveBeenCalledWith(
+      'C0123456789',
+      expect.any(String),
+      expect.any(Array),
+      'xoxb-test-bot-token',
+      '1705315800.000100'
+    );
+    expect(mockExecuteAsync).not.toHaveBeenCalled();
+    expect(result.mode).toBe('feedback_prompt');
+    expect(result.session_id).toBe('uuid-current');
   });
 
   test('reset intent ("/clear") rotates without calling the AI Agent', async () => {

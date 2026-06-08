@@ -19,6 +19,11 @@ import {
   extractRoutingKeyParts,
 } from '../../utils/conversation-store';
 import { findUserByEmail, getOrCreateActAsToken } from '../../utils/devrev-auth';
+import {
+  buildFeedbackPromptBlocks,
+  FEEDBACK_PROMPT_FALLBACK_TEXT,
+  isFeedbackIntent,
+} from '../../utils/feedback';
 import { readSessionTimingConfig, SessionTimingConfig } from '../../utils/session-config';
 import {
   buildConversationKey,
@@ -32,7 +37,13 @@ import {
   StoreConfig,
   touchSession,
 } from '../../utils/session-store';
-import { getChannelName, getUserProfile, removeBotMention, sendMessage } from '../../utils/slack-client';
+import {
+  getChannelName,
+  getUserProfile,
+  removeBotMention,
+  sendBlocksMessage,
+  sendMessage,
+} from '../../utils/slack-client';
 import { validateSlackSignature } from '../../utils/slack-signature-validator';
 import { postTimelineComment } from '../../utils/timeline';
 
@@ -160,6 +171,7 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
   }
 
   const isResetIntent = RESET_INTENT_PHRASES.has(cleanedMessage.trim().toLowerCase());
+  const isFeedback = !isResetIntent && isFeedbackIntent(cleanedMessage);
 
   const config = extractConfig(event);
 
@@ -343,6 +355,42 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
       console.warn(`[${requestId}] Failed to send new session confirmation: ${error?.message ?? error}`);
     });
     return { mode: 'new_session', session_id: sessionRecord.sessionId, status: 'success' };
+  }
+
+  if (isFeedback) {
+    const blocks = buildFeedbackPromptBlocks({
+      sessionId: sessionRecord.sessionId,
+      channel: conversationRef.channel,
+      threadTs,
+      userId: conversationRef.userId,
+    });
+    try {
+      const promptTs = await sendBlocksMessage(
+        conversationRef.channel,
+        FEEDBACK_PROMPT_FALLBACK_TEXT,
+        blocks,
+        config.slackBotToken,
+        threadTs
+      );
+      console.log(
+        `[${requestId}] [feedback] prompt posted ts=${promptTs} session=${sessionRecord.sessionId}`
+      );
+      return {
+        message: 'Feedback prompt posted',
+        mode: 'feedback_prompt',
+        session_id: sessionRecord.sessionId,
+        status: 'success',
+      };
+    } catch (error: any) {
+      console.error(`[${requestId}] [feedback] failed to post prompt: ${error?.message ?? error}`);
+      await sendMessage(
+        conversationRef.channel,
+        'Sorry, I could not open the feedback form. Please try again.',
+        config.slackBotToken,
+        threadTs
+      ).catch(() => {});
+      return { details: error?.message, reason: 'Failed to post feedback prompt', status: 'error' };
+    }
   }
 
   try {

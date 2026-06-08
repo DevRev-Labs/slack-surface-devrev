@@ -59,7 +59,7 @@ userEmail: `${TNT}user_email`,
 
   hardExpiresAtMs: `${TNT}hard_expires_at_ms`,
 
-  
+
 lastUsedAtMs: `${TNT}last_used_at_ms`,
 
   // Lifecycle
@@ -70,6 +70,19 @@ status: `${TNT}status`,
   previousSessionId: `${TNT}previous_session_id`,
   // Routing helpers
   tempMessageTs: `${TNT}temp_message_ts`,
+
+  // User feedback (1-5 rating + free-text comment) collected via the
+  // Slack feedback form. Written when the user submits; stays empty
+  // otherwise. One value per session — submitting again overwrites.
+  feedbackRating: `${TNT}feedback_rating`,
+  feedbackText: `${TNT}feedback_text`,
+  feedbackSubmittedAtMs: `${TNT}feedback_submitted_at_ms`,
+
+  // The most recent user-turn (matches messageCount) for which we have
+  // already posted a final AI response to Slack. Used by
+  // ai_response_handler to drop duplicate `message` events and late
+  // `progress` events emitted by the AI Agent for the same turn.
+  lastDeliveredTurn: `${TNT}last_delivered_turn`,
 } as const;
 
 const stripTnt = (name: string): string => (name.startsWith(TNT) ? name.slice(TNT.length) : name);
@@ -118,6 +131,11 @@ export const SESSION_FIELD_SPECS: FieldSpec[] = [
   { field_type: 'timestamp', is_filterable: true, name: stripTnt(SESSION_FIELD.lastUsedAtMs) },
   { field_type: 'timestamp', is_filterable: true, name: stripTnt(SESSION_FIELD.expiresAtMs) },
   { field_type: 'timestamp', name: stripTnt(SESSION_FIELD.hardExpiresAtMs) },
+  // Feedback
+  { field_type: 'int', name: stripTnt(SESSION_FIELD.feedbackRating) },
+  { field_type: 'text', name: stripTnt(SESSION_FIELD.feedbackText) },
+  { field_type: 'timestamp', name: stripTnt(SESSION_FIELD.feedbackSubmittedAtMs) },
+  { field_type: 'int', name: stripTnt(SESSION_FIELD.lastDeliveredTurn) },
 ];
 
 export type SchemaFieldSpec = FieldSpec;
