@@ -1,17 +1,13 @@
-import {
-  extractConversationReference,
-  generateSessionId,
-  ConversationReference,
-} from '../conversation-store';
+import { ConversationReference, extractConversationReference, generateSessionId } from '../conversation-store';
 
 describe('conversation-store helpers', () => {
   test('should extract conversation reference from Slack event', () => {
     const event = {
       channel: 'C0123456789',
-      user: 'U0123456789',
-      ts: '1705315800.000100',
-      thread_ts: '1705315799.000050',
       team: 'T0123456789',
+      thread_ts: '1705315799.000050',
+      ts: '1705315800.000100',
+      user: 'U0123456789',
     };
 
     const extracted: ConversationReference = extractConversationReference(event);
@@ -36,8 +32,8 @@ describe('conversation-store helpers', () => {
   test('should use thread_ts for session ID when in a thread', () => {
     const event = {
       channel: 'C0123456789',
-      ts: '1705315800.000100',
       thread_ts: '1705315799.000050',
+      ts: '1705315800.000100',
     };
 
     const sid = generateSessionId(event);

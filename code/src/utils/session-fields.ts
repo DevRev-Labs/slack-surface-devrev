@@ -15,74 +15,72 @@
 const TNT = 'tnt__';
 
 export const SESSION_FIELD = {
+  // Bot / DevRev linkage
+  botUserId: `${TNT}bot_user_id`,
+
   channel: `${TNT}channel`,
 
   channelName: `${TNT}channel_name`,
 
-  // Bot / DevRev linkage
-botUserId: `${TNT}bot_user_id`,
-
-  
-conversationKey: `${TNT}conversation_key`,
+  conversationKey: `${TNT}conversation_key`,
 
   conversationType: `${TNT}conversation_type`,
 
+  // Timestamps
+  createdAtMs: `${TNT}created_at_ms`,
+
   devrevUserId: `${TNT}devrev_user_id`,
-
-  
-  messageTs: `${TNT}message_ts`,
-
-  // Identity
-  sessionId: `${TNT}session_id`,
-
-  generation: `${TNT}generation`,
-
-  teamId: `${TNT}team_id`,
 
   endReason: `${TNT}end_reason`,
 
-  threadTs: `${TNT}thread_ts`,
-
-  // Timestamps
-createdAtMs: `${TNT}created_at_ms`,
-
-  
-  
-userEmail: `${TNT}user_email`,
-
-  // Slack user
-  userId: `${TNT}user_id`,
-
   expiresAtMs: `${TNT}expires_at_ms`,
-
-  userName: `${TNT}user_name`,
-
-  hardExpiresAtMs: `${TNT}hard_expires_at_ms`,
-
-
-lastUsedAtMs: `${TNT}last_used_at_ms`,
-
-  // Lifecycle
-status: `${TNT}status`,
-
-  messageCount: `${TNT}message_count`,
-
-  previousSessionId: `${TNT}previous_session_id`,
-  // Routing helpers
-  tempMessageTs: `${TNT}temp_message_ts`,
 
   // User feedback (1-5 rating + free-text comment) collected via the
   // Slack feedback form. Written when the user submits; stays empty
   // otherwise. One value per session — submitting again overwrites.
   feedbackRating: `${TNT}feedback_rating`,
-  feedbackText: `${TNT}feedback_text`,
+
   feedbackSubmittedAtMs: `${TNT}feedback_submitted_at_ms`,
+
+  feedbackText: `${TNT}feedback_text`,
+
+  generation: `${TNT}generation`,
+
+  hardExpiresAtMs: `${TNT}hard_expires_at_ms`,
 
   // The most recent user-turn (matches messageCount) for which we have
   // already posted a final AI response to Slack. Used by
   // ai_response_handler to drop duplicate `message` events and late
   // `progress` events emitted by the AI Agent for the same turn.
   lastDeliveredTurn: `${TNT}last_delivered_turn`,
+
+  lastUsedAtMs: `${TNT}last_used_at_ms`,
+
+  messageCount: `${TNT}message_count`,
+
+  messageTs: `${TNT}message_ts`,
+
+  previousSessionId: `${TNT}previous_session_id`,
+
+  // Identity
+  sessionId: `${TNT}session_id`,
+
+  // Lifecycle
+  status: `${TNT}status`,
+
+  teamId: `${TNT}team_id`,
+
+  // Routing helpers
+  tempMessageTs: `${TNT}temp_message_ts`,
+
+  threadTs: `${TNT}thread_ts`,
+
+  userEmail: `${TNT}user_email`,
+
+  // Slack user
+  userId: `${TNT}user_id`,
+
+  userName: `${TNT}user_name`,
 } as const;
 
 const stripTnt = (name: string): string => (name.startsWith(TNT) ? name.slice(TNT.length) : name);

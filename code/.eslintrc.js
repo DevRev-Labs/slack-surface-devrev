@@ -22,27 +22,37 @@ module.exports = {
   plugins: ['prettier', 'unused-imports', 'import', 'simple-import-sort', 'sort-keys-fix'],
   root: true,
   rules: {
-    'import/first': 'error', 
-    // Removes unused imports automatically,
-'@typescript-eslint/no-explicit-any': 'warn', 
-    
-// Ensures all imports are at the top of the file
-'import/newline-after-import': 'error', 
+    // Allows any type with a warning
+    '@typescript-eslint/no-explicit-any': 'warn',
+    // Permit `_`-prefixed names as intentionally unused (TS convention).
+    '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
+    'import/first': 'error',
+
+    // Ensures all imports are at the top of the file
+    'import/newline-after-import': 'error',
+
     // Ensures there’s a newline after the imports
     'import/no-duplicates': 'error',
+
     // Merges import statements from the same file
     'import/order': 'off',
+
     // Not compatible with simple-import-sort
     'no-unused-vars': 'off',
+
     // Handled by @typescript-eslint/no-unused-vars
     'simple-import-sort/exports': 'error',
+
     // Auto-formats exports
     'simple-import-sort/imports': 'error',
+
     // Auto-formats imports
     'sort-imports': 'off',
+
     // Not compatible with simple-import-sort
     'sort-keys-fix/sort-keys-fix': ['error', 'asc', { natural: true }],
+
     // Sorts long object key lists alphabetically
-    'unused-imports/no-unused-imports': 'error', // Allows any type with a warning
+    'unused-imports/no-unused-imports': 'error',
   },
 };

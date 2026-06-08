@@ -191,13 +191,13 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
   // further `message`/`progress` and any final-message fall-through.
   // `error` events are still allowed through so users see failures.
   const turnAlreadyDelivered =
-    !!sessionRecord &&
-    sessionRecord.messageCount > 0 &&
-    sessionRecord.lastDeliveredTurn >= sessionRecord.messageCount;
+    !!sessionRecord && sessionRecord.messageCount > 0 && sessionRecord.lastDeliveredTurn >= sessionRecord.messageCount;
 
-  if (turnAlreadyDelivered && agentResponseType !== 'error') {
+  if (turnAlreadyDelivered && agentResponseType !== 'error' && sessionRecord) {
     console.log(
-      `[${requestId}] [AI_RESP] dropping duplicate event (type=${agentResponseType ?? 'final-message'}) for turn=${sessionRecord!.messageCount} (already delivered)`
+      `[${requestId}] [AI_RESP] dropping duplicate event (type=${agentResponseType ?? 'final-message'}) for turn=${
+        sessionRecord.messageCount
+      } (already delivered)`
     );
     return { reason: 'Duplicate event for delivered turn', status: 'ignored' };
   }

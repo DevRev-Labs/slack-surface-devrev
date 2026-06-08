@@ -164,7 +164,7 @@ event_sources:
         4. Slash Commands → Create New Command:
            - Command: `/sda-feedback`
            - Paste the same Request URL above
-           - Short description: "Rate this conversation"
+           - Short description: "Share feedback on the SDA Agent"
 
         5. Interactivity & Shortcuts:
            - Toggle Interactivity ON

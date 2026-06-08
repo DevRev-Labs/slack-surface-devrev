@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { sendMessage, updateMessage, deleteMessage, getUserEmail, removeBotMention } from '../slack-client';
+import { deleteMessage, getUserProfile, removeBotMention, sendMessage, updateMessage } from '../slack-client';
 
 jest.mock('axios');
 const mockedAxios = axios as jest.Mocked<typeof axios>;
@@ -16,7 +16,7 @@ describe('slack-client', () => {
   describe('sendMessage', () => {
     it('should send a message and return timestamp', async () => {
       mockedAxios.post.mockResolvedValueOnce({
-        data: { ok: true, ts: '1705315801.000200' }
+        data: { ok: true, ts: '1705315801.000200' },
       });
 
       const result = await sendMessage(channel, 'Hello', botToken);
@@ -25,14 +25,14 @@ describe('slack-client', () => {
         'https://slack.com/api/chat.postMessage',
         { channel, text: 'Hello' },
         expect.objectContaining({
-          headers: { 'Authorization': `Bearer ${botToken}`, 'Content-Type': 'application/json' }
+          headers: { Authorization: `Bearer ${botToken}`, 'Content-Type': 'application/json' },
         })
       );
     });
 
     it('should include thread_ts when provided', async () => {
       mockedAxios.post.mockResolvedValueOnce({
-        data: { ok: true, ts: '1705315801.000200' }
+        data: { ok: true, ts: '1705315801.000200' },
       });
 
       await sendMessage(channel, 'Reply', botToken, ts);
@@ -45,7 +45,7 @@ describe('slack-client', () => {
 
     it('should throw error when Slack API returns error', async () => {
       mockedAxios.post.mockResolvedValueOnce({
-        data: { ok: false, error: 'channel_not_found' }
+        data: { error: 'channel_not_found', ok: false },
       });
 
       await expect(sendMessage(channel, 'Hello', botToken)).rejects.toThrow('Slack API error: channel_not_found');
@@ -55,32 +55,34 @@ describe('slack-client', () => {
   describe('updateMessage', () => {
     it('should update a message', async () => {
       mockedAxios.post.mockResolvedValueOnce({
-        data: { ok: true }
+        data: { ok: true },
       });
 
       await updateMessage(channel, ts, 'Updated text', botToken);
       expect(mockedAxios.post).toHaveBeenCalledWith(
         'https://slack.com/api/chat.update',
-        { channel, ts, text: 'Updated text' },
+        { channel, text: 'Updated text', ts },
         expect.objectContaining({
-          headers: { 'Authorization': `Bearer ${botToken}`, 'Content-Type': 'application/json' }
+          headers: { Authorization: `Bearer ${botToken}`, 'Content-Type': 'application/json' },
         })
       );
     });
 
     it('should throw error when update fails', async () => {
       mockedAxios.post.mockResolvedValueOnce({
-        data: { ok: false, error: 'message_not_found' }
+        data: { error: 'message_not_found', ok: false },
       });
 
-      await expect(updateMessage(channel, ts, 'Updated', botToken)).rejects.toThrow('Slack API error: message_not_found');
+      await expect(updateMessage(channel, ts, 'Updated', botToken)).rejects.toThrow(
+        'Slack API error: message_not_found'
+      );
     });
   });
 
   describe('deleteMessage', () => {
     it('should delete a message', async () => {
       mockedAxios.post.mockResolvedValueOnce({
-        data: { ok: true }
+        data: { ok: true },
       });
 
       await deleteMessage(channel, ts, botToken);
@@ -88,14 +90,14 @@ describe('slack-client', () => {
         'https://slack.com/api/chat.delete',
         { channel, ts },
         expect.objectContaining({
-          headers: { 'Authorization': `Bearer ${botToken}`, 'Content-Type': 'application/json' }
+          headers: { Authorization: `Bearer ${botToken}`, 'Content-Type': 'application/json' },
         })
       );
     });
 
     it('should not throw when message is already deleted', async () => {
       mockedAxios.post.mockResolvedValueOnce({
-        data: { ok: false, error: 'message_not_found' }
+        data: { error: 'message_not_found', ok: false },
       });
 
       // Should not throw
@@ -103,43 +105,44 @@ describe('slack-client', () => {
     });
   });
 
-  describe('getUserEmail', () => {
-    it('should return user email when found', async () => {
+  describe('getUserProfile', () => {
+    it('returns email + name when both are present on the user', async () => {
       mockedAxios.get.mockResolvedValueOnce({
         data: {
           ok: true,
-          user: { id: 'U0123456789', profile: { email: 'user@example.com' } }
-        }
+          user: {
+            id: 'U0123456789',
+            profile: { display_name: 'Test User', email: 'user@example.com' },
+          },
+        },
       });
 
-      const result = await getUserEmail('U0123456789', botToken);
-      expect(result).toBe('user@example.com');
+      const result = await getUserProfile('U0123456789', botToken);
+      expect(result).toEqual({ email: 'user@example.com', name: 'Test User' });
       expect(mockedAxios.get).toHaveBeenCalledWith(
         'https://slack.com/api/users.info',
         expect.objectContaining({
+          headers: { Authorization: `Bearer ${botToken}` },
           params: { user: 'U0123456789' },
-          headers: { 'Authorization': `Bearer ${botToken}` }
         })
       );
     });
 
-    it('should return null when user has no email', async () => {
+    it('returns null email when the profile lacks one', async () => {
       mockedAxios.get.mockResolvedValueOnce({
-        data: { ok: true, user: { id: 'U0123456789', profile: {} } }
+        data: { ok: true, user: { id: 'U0123456789', profile: {} } },
       });
-
-      const result = await getUserEmail('U0123456789', botToken);
-      expect(result).toBeNull();
+      const result = await getUserProfile('U0123456789', botToken);
+      expect(result.email).toBeNull();
     });
 
-    it('should return null on API error', async () => {
+    it('returns null email on API error', async () => {
       const consoleSpy = jest.spyOn(console, 'error').mockImplementation();
       mockedAxios.get.mockResolvedValueOnce({
-        data: { ok: false, error: 'user_not_found' }
+        data: { error: 'user_not_found', ok: false },
       });
-
-      const result = await getUserEmail('U0123456789', botToken);
-      expect(result).toBeNull();
+      const result = await getUserProfile('U0123456789', botToken);
+      expect(result.email).toBeNull();
       consoleSpy.mockRestore();
     });
   });

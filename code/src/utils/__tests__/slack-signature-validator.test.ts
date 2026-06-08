@@ -13,7 +13,7 @@ function signSlack(secret: string, ts: string, rawBodyUtf8: string): string {
 }
 
 describe('validateSlackSignature (header-presence gate)', () => {
-  const sampleBody = { type: 'event_callback', event: { type: 'app_mention', text: 'hi' } };
+  const sampleBody = { event: { text: 'hi', type: 'app_mention' }, type: 'event_callback' };
 
   test('rejects when X-Slack-Signature header is absent', () => {
     const result = validateSlackSignature(undefined, { 'x-slack-request-timestamp': nowTs() }, sampleBody);
@@ -30,8 +30,8 @@ describe('validateSlackSignature (header-presence gate)', () => {
   test('rejects when signature is not in v0=<hex64> form', () => {
     const result = validateSlackSignature(
       undefined,
-      { 'x-slack-signature': 'v0=tooShort', 'x-slack-request-timestamp': nowTs() },
-      sampleBody,
+      { 'x-slack-request-timestamp': nowTs(), 'x-slack-signature': 'v0=tooShort' },
+      sampleBody
     );
     expect(result.valid).toBe(false);
     expect(result.reason).toMatch(/v0=/i);
@@ -40,8 +40,8 @@ describe('validateSlackSignature (header-presence gate)', () => {
   test('rejects when signature has wrong prefix', () => {
     const result = validateSlackSignature(
       undefined,
-      { 'x-slack-signature': `v1=${HEX64}`, 'x-slack-request-timestamp': nowTs() },
-      sampleBody,
+      { 'x-slack-request-timestamp': nowTs(), 'x-slack-signature': `v1=${HEX64}` },
+      sampleBody
     );
     expect(result.valid).toBe(false);
   });
@@ -49,8 +49,8 @@ describe('validateSlackSignature (header-presence gate)', () => {
   test('rejects when timestamp is older than 5 minutes', () => {
     const result = validateSlackSignature(
       undefined,
-      { 'x-slack-signature': `v0=${HEX64}`, 'x-slack-request-timestamp': nowTs(-6 * 60) },
-      sampleBody,
+      { 'x-slack-request-timestamp': nowTs(-6 * 60), 'x-slack-signature': `v0=${HEX64}` },
+      sampleBody
     );
     expect(result.valid).toBe(false);
     expect(result.reason).toMatch(/replay|window/i);
@@ -59,8 +59,8 @@ describe('validateSlackSignature (header-presence gate)', () => {
   test('rejects when timestamp is non-numeric', () => {
     const result = validateSlackSignature(
       undefined,
-      { 'x-slack-signature': `v0=${HEX64}`, 'x-slack-request-timestamp': 'not-a-number' },
-      sampleBody,
+      { 'x-slack-request-timestamp': 'not-a-number', 'x-slack-signature': `v0=${HEX64}` },
+      sampleBody
     );
     expect(result.valid).toBe(false);
   });
@@ -68,8 +68,8 @@ describe('validateSlackSignature (header-presence gate)', () => {
   test('accepts a well-formed Slack-style request', () => {
     const result = validateSlackSignature(
       undefined,
-      { 'x-slack-signature': `v0=${HEX64}`, 'x-slack-request-timestamp': nowTs() },
-      sampleBody,
+      { 'x-slack-request-timestamp': nowTs(), 'x-slack-signature': `v0=${HEX64}` },
+      sampleBody
     );
     expect(result.valid).toBe(true);
   });
@@ -77,8 +77,8 @@ describe('validateSlackSignature (header-presence gate)', () => {
   test('accepts headers regardless of casing (HTTP headers are case-insensitive)', () => {
     const result = validateSlackSignature(
       undefined,
-      { 'X-Slack-Signature': `v0=${HEX64}`, 'X-Slack-Request-Timestamp': nowTs() },
-      sampleBody,
+      { 'X-Slack-Request-Timestamp': nowTs(), 'X-Slack-Signature': `v0=${HEX64}` },
+      sampleBody
     );
     expect(result.valid).toBe(true);
   });
@@ -93,9 +93,9 @@ describe('validateSlackSignature (header-presence gate)', () => {
       const sig = signSlack(SECRET, ts, RAW);
       const result = validateSlackSignature(
         SECRET,
-        { 'x-slack-signature': sig, 'x-slack-request-timestamp': ts },
+        { 'x-slack-request-timestamp': ts, 'x-slack-signature': sig },
         sampleBody,
-        RAW_B64,
+        RAW_B64
       );
       expect(result.valid).toBe(true);
     });
@@ -104,9 +104,9 @@ describe('validateSlackSignature (header-presence gate)', () => {
       const ts = nowTs();
       const result = validateSlackSignature(
         SECRET,
-        { 'x-slack-signature': `v0=${HEX64}`, 'x-slack-request-timestamp': ts },
+        { 'x-slack-request-timestamp': ts, 'x-slack-signature': `v0=${HEX64}` },
         sampleBody,
-        RAW_B64,
+        RAW_B64
       );
       expect(result.valid).toBe(false);
       expect(result.reason).toMatch(/HMAC/i);
@@ -118,9 +118,9 @@ describe('validateSlackSignature (header-presence gate)', () => {
       const tamperedRawB64 = Buffer.from(RAW + ' ', 'utf8').toString('base64');
       const result = validateSlackSignature(
         SECRET,
-        { 'x-slack-signature': sig, 'x-slack-request-timestamp': ts },
+        { 'x-slack-request-timestamp': ts, 'x-slack-signature': sig },
         sampleBody,
-        tamperedRawB64,
+        tamperedRawB64
       );
       expect(result.valid).toBe(false);
       expect(result.reason).toMatch(/HMAC/i);
@@ -131,9 +131,9 @@ describe('validateSlackSignature (header-presence gate)', () => {
       const sig = signSlack(SECRET, ts, RAW);
       const result = validateSlackSignature(
         'different-secret',
-        { 'x-slack-signature': sig, 'x-slack-request-timestamp': ts },
+        { 'x-slack-request-timestamp': ts, 'x-slack-signature': sig },
         sampleBody,
-        RAW_B64,
+        RAW_B64
       );
       expect(result.valid).toBe(false);
       expect(result.reason).toMatch(/HMAC/i);
@@ -142,9 +142,9 @@ describe('validateSlackSignature (header-presence gate)', () => {
     test('falls back to header-presence gate when body_raw is absent', () => {
       const result = validateSlackSignature(
         SECRET,
-        { 'x-slack-signature': `v0=${HEX64}`, 'x-slack-request-timestamp': nowTs() },
+        { 'x-slack-request-timestamp': nowTs(), 'x-slack-signature': `v0=${HEX64}` },
         sampleBody,
-        undefined,
+        undefined
       );
       expect(result.valid).toBe(true);
     });

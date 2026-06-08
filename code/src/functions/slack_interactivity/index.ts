@@ -1,45 +1,39 @@
 /**
  * Slack Interactivity + Slash Command Handler.
  *
- * One function, three event shapes — all delivered to the same Slack
- * "interactivity" webhook with `application/x-www-form-urlencoded` bodies:
+ * Two event shapes, both delivered to the same Slack interactivity
+ * webhook with `application/x-www-form-urlencoded` bodies:
  *
- *   1. Slash command (`/sda-feedback`)
- *      Form fields: command, user_id, channel_id, trigger_id, …
- *      → open the feedback modal directly with the slash command's
- *        trigger_id; resolves the active session via channel + user.
+ *   1. Slash command (`/sda-feedback`) — form fields: command,
+ *      user_id, channel_id, trigger_id. Opens a Loading modal,
+ *      resolves the active session, swaps in the real form.
  *
- *   2. Block-Kit interaction (`payload=<JSON>` with type=block_actions)
- *      → reserved for future buttons (e.g. inline ratings).
+ *   2. Modal submission (`payload=<JSON>` with type=view_submission)
+ *      — persists rating + comment onto the session's conversation
+ *      custom fields, swaps the modal to a thank-you view, and
+ *      sends a private (ephemeral) breadcrumb in-thread.
  *
- *   3. Modal submission (`payload=<JSON>` with type=view_submission)
- *      → persist rating + comment onto the session's conversation
- *        custom fields and confirm in-thread.
- *
- * The Rego policy on `slack-interactivity-source` normalizes both shapes
- * (a slash-command form and the JSON-in-`payload` envelope) and forwards
- * a uniform `{ body, headers, body_raw }` structure. Signature checking
- * happens against `body_raw` exactly the same way as the events handler.
+ * Signature verification happens against `body_raw` (HMAC-SHA256 over
+ * the exact bytes Slack signed) — same as the events handler.
  */
 
+/* eslint-disable simple-import-sort/imports */
 import { FunctionInput } from '../../types';
 import {
-  ACTION_DISMISS_FEEDBACK_PROMPT,
-  ACTION_OPEN_FEEDBACK,
   buildErrorModal,
   buildFeedbackConfirmationBlocks,
-  buildFeedbackDismissedBlocks,
   buildFeedbackModal,
+  buildFeedbackThanksModal,
   buildLoadingModal,
   decodeContext,
+  feedbackConfirmationFallbackText,
+  FeedbackContext,
   FEEDBACK_ACTION_RATING,
   FEEDBACK_ACTION_TEXT,
   FEEDBACK_BLOCK_RATING,
   FEEDBACK_BLOCK_TEXT,
   FEEDBACK_SLASH_COMMAND,
   FEEDBACK_VIEW_CALLBACK,
-  FeedbackContext,
-  feedbackConfirmationFallbackText,
 } from '../../utils/feedback';
 import { readSessionTimingConfig } from '../../utils/session-config';
 import {
@@ -49,15 +43,18 @@ import {
   SessionRecord,
   StoreConfig,
 } from '../../utils/session-store';
-import {
-  openView,
-  sendBlocksMessage,
-  updateMessageBlocks,
-  updateView,
-} from '../../utils/slack-client';
+import { openView, postEphemeral, updateView } from '../../utils/slack-client';
 import { validateSlackSignature } from '../../utils/slack-signature-validator';
+/* eslint-enable simple-import-sort/imports */
 
 const FORBIDDEN_RESPONSE = { status: 'forbidden', status_code: 403 };
+
+/** Extract a string from `catch (e: unknown)` for log/return without `any`. */
+function errMsg(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (typeof e === 'string') return e;
+  return String(e);
+}
 
 /**
  * Slash-command form payload (Rego forwards this verbatim under `body`
@@ -88,6 +85,10 @@ interface SlackInteractivityPayload {
   view?: {
     callback_id?: string;
     private_metadata?: string;
+    // Slack populates this with arbitrarily nested element values
+    // (selected_option, value, text, etc.) — we read shape per-element
+    // at use sites, so a loose `any` map is appropriate here.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     state?: { values?: Record<string, Record<string, any>> };
   };
 }
@@ -97,12 +98,9 @@ export const run = async (events: FunctionInput[]): Promise<any> => {
     events.map(async (event) => {
       try {
         return await handle(event);
-      } catch (error: any) {
-        console.error(
-          `[${event?.execution_metadata?.request_id ?? 'unknown'}] [interactivity] error:`,
-          error?.message || error
-        );
-        return { reason: error?.message || 'Unknown error', status: 'error' };
+      } catch (error: unknown) {
+        console.error(`[${event?.execution_metadata?.request_id ?? 'unknown'}] [interactivity] error:`, errMsg(error));
+        return { reason: errMsg(error) || 'Unknown error', status: 'error' };
       }
     })
   );
@@ -122,8 +120,7 @@ async function handle(event: FunctionInput): Promise<any> {
     }`
   );
 
-  const wrapped =
-    payload && typeof payload === 'object' && 'body' in payload && 'headers' in payload ? payload : null;
+  const wrapped = payload && typeof payload === 'object' && 'body' in payload && 'headers' in payload ? payload : null;
   let body: any = wrapped ? wrapped.body : payload;
   const headers: Record<string, any> | undefined = wrapped ? wrapped.headers : undefined;
   const bodyRaw: string | undefined =
@@ -172,8 +169,8 @@ async function handle(event: FunctionInput): Promise<any> {
       if (Object.keys(parsed).length > 0) {
         body = parsed;
       }
-    } catch (err: any) {
-      console.warn(`[${requestId}] [interactivity] body_raw decode failed: ${err?.message || err}`);
+    } catch (err: unknown) {
+      console.warn(`[${requestId}] [interactivity] body_raw decode failed: ${errMsg(err)}`);
     }
   }
 
@@ -182,8 +179,8 @@ async function handle(event: FunctionInput): Promise<any> {
   if (body && typeof body === 'object' && typeof body.payload === 'string') {
     try {
       body = JSON.parse(body.payload);
-    } catch (err: any) {
-      console.warn(`[${requestId}] [interactivity] payload JSON parse failed: ${err?.message || err}`);
+    } catch (err: unknown) {
+      console.warn(`[${requestId}] [interactivity] payload JSON parse failed: ${errMsg(err)}`);
     }
   }
 
@@ -225,78 +222,10 @@ async function handle(event: FunctionInput): Promise<any> {
   if (type === 'view_submission') {
     return handleViewSubmission(interactivity, slackBotToken, storeConfig, requestId);
   }
-  if (type === 'block_actions') {
-    return handleBlockActions(interactivity, slackBotToken, requestId);
-  }
-  if (type === 'view_closed') {
+  if (type === 'view_closed' || type === 'block_actions') {
     return { reason: `No-op for type ${type}`, status: 'ignored' };
   }
   return { reason: `Unsupported interactivity type: ${type}`, status: 'ignored' };
-}
-
-/**
- * Handle Block-Kit button clicks.
- *
- * Today the only buttons we render are the typed-text feedback prompt's
- * "Give Feedback" / "Not now" pair. Click → use the click's trigger_id
- * to open the modal directly (the prompt was posted with the resolved
- * sessionId baked into the button's `value`, so no DevRev round-trip
- * is needed during the 3s trigger_id window).
- */
-async function handleBlockActions(
-  payload: SlackInteractivityPayload,
-  slackBotToken: string,
-  requestId: string
-): Promise<any> {
-  const action = payload.actions?.[0];
-  if (!action?.action_id) {
-    return { reason: 'No action in block_actions payload', status: 'ignored' };
-  }
-
-  const channel = payload.container?.channel_id || payload.channel?.id;
-  const messageTs = payload.container?.message_ts || payload.message?.ts;
-
-  if (action.action_id === ACTION_OPEN_FEEDBACK) {
-    const ctx = decodeContext(action.value);
-    if (!ctx) {
-      console.warn(`[${requestId}] [block_actions] invalid context on feedback button`);
-      return { reason: 'Invalid feedback prompt value', status: 'error' };
-    }
-    if (!payload.trigger_id) {
-      console.warn(`[${requestId}] [block_actions] missing trigger_id`);
-      return { reason: 'Missing trigger_id', status: 'error' };
-    }
-    try {
-      // Open the real form directly — sessionId is already in ctx.
-      await openView(payload.trigger_id, buildFeedbackModal(ctx), slackBotToken);
-      console.log(
-        `[${requestId}] [block_actions] feedback modal opened session=${ctx.sessionId}`
-      );
-      return { mode: 'feedback_modal_opened', session_id: ctx.sessionId, status: 'success' };
-    } catch (error: any) {
-      console.error(`[${requestId}] [block_actions] views.open failed: ${error?.message || error}`);
-      return { details: error?.message, reason: 'views.open failed', status: 'error' };
-    }
-  }
-
-  if (action.action_id === ACTION_DISMISS_FEEDBACK_PROMPT) {
-    if (channel && messageTs) {
-      try {
-        await updateMessageBlocks(
-          channel,
-          messageTs,
-          'Feedback skipped.',
-          buildFeedbackDismissedBlocks(),
-          slackBotToken
-        );
-      } catch (error: any) {
-        console.warn(`[${requestId}] [block_actions] dismiss update failed: ${error?.message || error}`);
-      }
-    }
-    return { mode: 'feedback_prompt_dismissed', status: 'success' };
-  }
-
-  return { reason: `Unhandled action_id: ${action.action_id}`, status: 'ignored' };
 }
 
 /**
@@ -342,9 +271,9 @@ async function handleSlashCommand(
     console.log(
       `[${requestId}] [slash] /sda-feedback loading modal opened view_id=${viewId} channel=${cmd.channel_id} user=${cmd.user_id}`
     );
-  } catch (error: any) {
-    console.error(`[${requestId}] [slash] views.open (loading) failed: ${error?.message || error}`);
-    return { details: error?.message, reason: 'views.open failed', status: 'error' };
+  } catch (error: unknown) {
+    console.error(`[${requestId}] [slash] views.open (loading) failed: ${errMsg(error)}`);
+    return { details: errMsg(error), reason: 'views.open failed', status: 'error' };
   }
 
   if (!viewId) {
@@ -355,13 +284,9 @@ async function handleSlashCommand(
   // Stage 2 — resolve the active session and update the modal.
   let session: SessionRecord | null = null;
   try {
-    session = await getLatestActiveSessionForUserInChannel(
-      storeConfig,
-      cmd.channel_id,
-      cmd.user_id
-    );
-  } catch (error: any) {
-    console.warn(`[${requestId}] [slash] active-session lookup failed: ${error?.message || error}`);
+    session = await getLatestActiveSessionForUserInChannel(storeConfig, cmd.channel_id, cmd.user_id);
+  } catch (error: unknown) {
+    console.warn(`[${requestId}] [slash] active-session lookup failed: ${errMsg(error)}`);
   }
 
   if (!session) {
@@ -372,37 +297,39 @@ async function handleSlashCommand(
       await updateView(
         viewId,
         buildErrorModal(
-          "You don't have an active conversation here yet. Mention the bot or send a DM, then try `/sda-feedback` once you've chatted."
+          'No active SDA Agent conversation was found in this channel.\n\nStart a conversation by mentioning the bot or sending a direct message, then run `/sda-feedback` again to share your feedback.'
         ),
         slackBotToken
       );
-    } catch (error: any) {
-      console.warn(`[${requestId}] [slash] views.update (error) failed: ${error?.message || error}`);
+    } catch (error: unknown) {
+      console.warn(`[${requestId}] [slash] views.update (error) failed: ${errMsg(error)}`);
     }
     return { mode: 'feedback_no_session', status: 'success' };
   }
 
   // Real form — sessionId baked into private_metadata so submit is direct.
   const ctx: FeedbackContext = {
-    sessionId: session.sessionId,
     channel: session.channel,
+    sessionId: session.sessionId,
     threadTs: session.threadTs || undefined,
     userId: cmd.user_id,
   };
   try {
     await updateView(viewId, buildFeedbackModal(ctx), slackBotToken);
-    console.log(
-      `[${requestId}] [slash] /sda-feedback form rendered for session=${session.sessionId}`
-    );
+    console.log(`[${requestId}] [slash] /sda-feedback form rendered for session=${session.sessionId}`);
     return { mode: 'feedback_modal_opened', session_id: session.sessionId, status: 'success' };
-  } catch (error: any) {
-    console.error(`[${requestId}] [slash] views.update failed: ${error?.message || error}`);
-    return { details: error?.message, reason: 'views.update failed', status: 'error' };
+  } catch (error: unknown) {
+    console.error(`[${requestId}] [slash] views.update failed: ${errMsg(error)}`);
+    return { details: errMsg(error), reason: 'views.update failed', status: 'error' };
   }
 }
 
+interface ViewSubmissionUser {
+  id?: string;
+}
+
 async function handleViewSubmission(
-  payload: SlackInteractivityPayload,
+  payload: SlackInteractivityPayload & { user?: ViewSubmissionUser },
   slackBotToken: string,
   storeConfig: StoreConfig,
   requestId: string
@@ -415,14 +342,16 @@ async function handleViewSubmission(
   if (!ctx) {
     console.warn(`[${requestId}] [feedback] submit: invalid private_metadata`);
     return responseActionErrors({
-      [FEEDBACK_BLOCK_RATING]: 'We could not identify your session. Please try again.',
+      [FEEDBACK_BLOCK_RATING]: 'We could not identify your session. Please close this form and try again.',
     });
   }
 
   const values = payload.view.state?.values || {};
   const rating = parseRating(values[FEEDBACK_BLOCK_RATING]?.[FEEDBACK_ACTION_RATING]);
   if (!rating) {
-    return responseActionErrors({ [FEEDBACK_BLOCK_RATING]: 'Please pick a rating.' });
+    return responseActionErrors({
+      [FEEDBACK_BLOCK_RATING]: 'Please select a rating before submitting.',
+    });
   }
   const comment =
     typeof values[FEEDBACK_BLOCK_TEXT]?.[FEEDBACK_ACTION_TEXT]?.value === 'string'
@@ -438,14 +367,10 @@ async function handleViewSubmission(
     if (ctx.sessionId) {
       sessionRecord = await getSessionById(storeConfig, ctx.sessionId);
     } else if (ctx.userId && ctx.channel) {
-      sessionRecord = await getLatestActiveSessionForUserInChannel(
-        storeConfig,
-        ctx.channel,
-        ctx.userId
-      );
+      sessionRecord = await getLatestActiveSessionForUserInChannel(storeConfig, ctx.channel, ctx.userId);
     }
-  } catch (error: any) {
-    console.warn(`[${requestId}] [feedback] session lookup failed: ${error?.message || error}`);
+  } catch (error: unknown) {
+    console.warn(`[${requestId}] [feedback] session lookup failed: ${errMsg(error)}`);
   }
 
   if (!sessionRecord) {
@@ -456,7 +381,7 @@ async function handleViewSubmission(
     );
     return responseActionErrors({
       [FEEDBACK_BLOCK_RATING]:
-        "We couldn't find an active conversation here. Mention the bot or send a DM, then try again.",
+        'No active SDA Agent conversation was found in this channel. Start a conversation with the bot, then try again.',
     });
   }
 
@@ -464,40 +389,52 @@ async function handleViewSubmission(
   try {
     await patchSession(storeConfig, sessionRecord, {
       feedbackRating: rating,
-      feedbackText: comment,
       feedbackSubmittedAt: submittedAt,
+      feedbackText: comment,
     });
     console.log(
       `[${requestId}] [feedback] persisted session=${ctx.sessionId} rating=${rating} comment_chars=${comment.length}`
     );
-  } catch (error: any) {
-    console.error(`[${requestId}] [feedback] patchSession failed: ${error?.message || error}`);
+  } catch (error: unknown) {
+    console.error(`[${requestId}] [feedback] patchSession failed: ${errMsg(error)}`);
     return responseActionErrors({
-      [FEEDBACK_BLOCK_RATING]: 'Could not save your feedback. Please try again.',
+      [FEEDBACK_BLOCK_RATING]: 'We could not save your feedback right now. Please try again.',
     });
   }
 
-  // Confirm in the same thread the session lives in. Best-effort.
-  // Prefer the session's recorded thread, falling back to whatever
-  // came in via private_metadata (modal opened in a thread).
+  // Send a PRIVATE confirmation back. Two layers, both visible only to
+  // the submitter:
+  //   1. response_action: 'update' swaps the modal contents in-place to
+  //      a "Thanks for the feedback!" view (modals are inherently
+  //      private to the user who opened them).
+  //   2. chat.postEphemeral posts a small breadcrumb in the same thread
+  //      that ONLY the submitter can see. Other members of the channel
+  //      see nothing.
   const confirmChannel = sessionRecord.channel || ctx.channel;
   const confirmThread = sessionRecord.threadTs || ctx.threadTs;
-  if (confirmChannel) {
+  const submitterUserId = payload.user?.id || ctx.userId || '';
+  if (confirmChannel && submitterUserId) {
     try {
-      await sendBlocksMessage(
+      await postEphemeral(
         confirmChannel,
+        submitterUserId,
         feedbackConfirmationFallbackText(rating),
         buildFeedbackConfirmationBlocks(rating, comment),
         slackBotToken,
         confirmThread
       );
-    } catch (err: any) {
-      console.warn(`[${requestId}] [feedback] confirmation send failed: ${err?.message || err}`);
+    } catch (err: unknown) {
+      console.warn(`[${requestId}] [feedback] ephemeral send failed: ${errMsg(err)}`);
     }
   }
 
-  // Slack expects an empty body to dismiss the modal cleanly.
-  return {};
+  // Tell Slack to swap the modal to the thank-you view. Slack only
+  // renders the modal to the submitter, so the rating + comment are
+  // never visible to anyone else.
+  return {
+    response_action: 'update',
+    view: buildFeedbackThanksModal(rating, comment),
+  };
 }
 
 function parseRating(input: any): number | null {
@@ -514,7 +451,7 @@ function parseRating(input: any): number | null {
  * Keeps the modal open so the user can correct.
  */
 function responseActionErrors(errors: Record<string, string>): any {
-  return { response_action: 'errors', errors };
+  return { errors, response_action: 'errors' };
 }
 
 /**

@@ -1,11 +1,6 @@
-import { run } from '../index';
-import * as sessionStore from '../../../utils/session-store';
-import * as slackClient from '../../../utils/slack-client';
 import { FunctionInput } from '../../../types';
-import { SessionRecord } from '../../../utils/session-store';
+// eslint-disable-next-line simple-import-sort/imports
 import {
-  ACTION_DISMISS_FEEDBACK_PROMPT,
-  ACTION_OPEN_FEEDBACK,
   encodeContext,
   FEEDBACK_ACTION_RATING,
   FEEDBACK_ACTION_TEXT,
@@ -13,6 +8,10 @@ import {
   FEEDBACK_BLOCK_TEXT,
   FEEDBACK_VIEW_CALLBACK,
 } from '../../../utils/feedback';
+import * as sessionStore from '../../../utils/session-store';
+import { SessionRecord } from '../../../utils/session-store';
+import * as slackClient from '../../../utils/slack-client';
+import { run } from '../index';
 
 jest.mock('../../../utils/session-store');
 jest.mock('../../../utils/slack-client');
@@ -25,63 +24,63 @@ const mockedSlackClient = slackClient as jest.Mocked<typeof slackClient>;
 
 function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {
-    objectId: 'co-1',
-    sessionId: 'sess-1',
-    conversationKey: 'ck',
+    botUserId: '',
     channel: 'C1',
     channelName: '',
+    conversationKey: 'ck',
     conversationType: '',
-    threadTs: 't1',
+    createdAt: 0,
+    devrevUserId: '',
+    endReason: '',
+    expiresAt: 0,
+    feedbackRating: 0,
+    feedbackSubmittedAt: 0,
+    feedbackText: '',
+    generation: 0,
+    hardExpiresAt: 0,
+    lastDeliveredTurn: 0,
+    lastUsedAt: 0,
+    messageCount: 0,
     messageTs: '',
+    objectId: 'co-1',
+    previousSessionId: '',
+    sessionId: 'sess-1',
+    status: 'active',
     teamId: '',
+    tempMessageTs: '',
+    threadTs: 't1',
+    userEmail: '',
     userId: 'U1',
     userName: '',
-    userEmail: '',
-    botUserId: '',
-    devrevUserId: '',
-    tempMessageTs: '',
-    status: 'active',
-    generation: 0,
-    previousSessionId: '',
-    endReason: '',
-    messageCount: 0,
-    createdAt: 0,
-    lastUsedAt: 0,
-    expiresAt: 0,
-    hardExpiresAt: 0,
-    feedbackRating: 0,
-    feedbackText: '',
-    feedbackSubmittedAt: 0,
-    lastDeliveredTurn: 0,
     ...overrides,
   };
 }
 
 function makeBaseEvent(payload: any): FunctionInput {
   return {
-    payload,
+    context: {
+      dev_oid: 'd',
+      secrets: { service_account_token: 'sat' },
+      service_account_id: 'sa',
+      snap_in_id: 'si',
+      snap_in_version_id: 'siv',
+      source_id: 's',
+    },
     execution_metadata: {
-      request_id: 'req-int',
       devrev_endpoint: 'https://api.devrev.ai',
-      function_name: 'slack_interactivity',
       event_type: 'custom:slack-interactivity',
+      function_name: 'slack_interactivity',
+      request_id: 'req-int',
     },
     input_data: {
-      global_values: { ai_agent_id: '' },
       event_sources: {},
+      global_values: { ai_agent_id: '' },
       keyrings: {
         slack_bot_token: 'xoxb-test',
         slack_signing_secret: 'sig',
       },
     },
-    context: {
-      dev_oid: 'd',
-      source_id: 's',
-      snap_in_id: 'si',
-      snap_in_version_id: 'siv',
-      service_account_id: 'sa',
-      secrets: { service_account_token: 'sat' },
-    },
+    payload,
   };
 }
 
@@ -90,7 +89,7 @@ describe('slack_interactivity', () => {
     jest.clearAllMocks();
     mockedSlackClient.openView.mockResolvedValue('view-id-1');
     mockedSlackClient.updateView.mockResolvedValue();
-    mockedSlackClient.sendBlocksMessage.mockResolvedValue('ts');
+    mockedSlackClient.postEphemeral.mockResolvedValue();
     mockedSessionStore.getLatestActiveSessionForUserInChannel.mockResolvedValue(makeRecord());
     mockedSessionStore.getSessionById.mockResolvedValue(makeRecord());
     mockedSessionStore.patchSession.mockImplementation(async (_c, r) => r);
@@ -100,10 +99,10 @@ describe('slack_interactivity', () => {
     test('/sda-feedback: opens loading modal first, then resolves session, then updates with form', async () => {
       const result = await run([
         makeBaseEvent({
+          channel_id: 'C1',
           command: '/sda-feedback',
           trigger_id: 'trig-1',
           user_id: 'U1',
-          channel_id: 'C1',
         }),
       ]);
       // Stage 1: trigger_id consumed by views.open with the loading modal.
@@ -138,10 +137,10 @@ describe('slack_interactivity', () => {
       mockedSessionStore.getLatestActiveSessionForUserInChannel.mockResolvedValue(null);
       const result = await run([
         makeBaseEvent({
+          channel_id: 'C-no',
           command: '/sda-feedback',
           trigger_id: 'trig-2',
           user_id: 'U-no',
-          channel_id: 'C-no',
         }),
       ]);
       expect(mockedSlackClient.openView).toHaveBeenCalled();
@@ -149,17 +148,17 @@ describe('slack_interactivity', () => {
       const updateCall = mockedSlackClient.updateView.mock.calls[0];
       expect(updateCall[0]).toBe('view-id-1');
       expect(updateCall[1].submit).toBeUndefined();
-      expect(updateCall[1].blocks?.[0]?.text?.text).toMatch(/active conversation/i);
+      expect(updateCall[1].blocks?.[0]?.text?.text).toMatch(/active.*conversation/i);
       expect(result.mode).toBe('feedback_no_session');
     });
 
     test('unknown slash commands are ignored', async () => {
       const result = await run([
         makeBaseEvent({
+          channel_id: 'C',
           command: '/somethingelse',
           trigger_id: 't',
           user_id: 'U',
-          channel_id: 'C',
         }),
       ]);
       expect(result.status).toBe('ignored');
@@ -167,19 +166,18 @@ describe('slack_interactivity', () => {
     });
 
     test('/feedback without trigger_id is rejected', async () => {
-      const result = await run([
-        makeBaseEvent({ command: '/sda-feedback', user_id: 'U1', channel_id: 'C1' }),
-      ]);
+      const result = await run([makeBaseEvent({ channel_id: 'C1', command: '/sda-feedback', user_id: 'U1' })]);
       expect(result.status).toBe('error');
     });
   });
 
   describe('view_submission', () => {
-    test('persists rating + comment to the session and posts a confirmation', async () => {
-      const ctx = encodeContext({ sessionId: 'sess-1', channel: 'C1', threadTs: 't1' });
-      await run([
+    test('persists rating + comment, swaps modal to thanks, sends ephemeral confirmation only to submitter', async () => {
+      const ctx = encodeContext({ channel: 'C1', sessionId: 'sess-1', threadTs: 't1' });
+      const result = await run([
         makeBaseEvent({
           type: 'view_submission',
+          user: { id: 'Usubmitter' },
           view: {
             callback_id: FEEDBACK_VIEW_CALLBACK,
             private_metadata: ctx,
@@ -194,22 +192,29 @@ describe('slack_interactivity', () => {
           },
         }),
       ]);
+      // 1. Feedback persisted onto the session.
       expect(mockedSessionStore.patchSession).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({ sessionId: 'sess-1' }),
         expect.objectContaining({ feedbackRating: 4, feedbackText: 'nice' })
       );
-      expect(mockedSlackClient.sendBlocksMessage).toHaveBeenCalledWith(
+      // 2. Ephemeral message addressed to the submitter only, in the
+      //    same channel + thread the session lives in.
+      expect(mockedSlackClient.postEphemeral).toHaveBeenCalledWith(
         'C1',
+        'Usubmitter',
         expect.any(String),
         expect.any(Array),
         'xoxb-test',
         't1'
       );
+      // 4. Modal swapped to a thank-you view (private to submitter).
+      expect(result.response_action).toBe('update');
+      expect(result.view?.title?.text).toMatch(/feedback/i);
     });
 
     test('surfaces validation error when no rating selected', async () => {
-      const ctx = encodeContext({ sessionId: 'sess-1', channel: 'C1' });
+      const ctx = encodeContext({ channel: 'C1', sessionId: 'sess-1' });
       const result = await run([
         makeBaseEvent({
           type: 'view_submission',
@@ -226,7 +231,7 @@ describe('slack_interactivity', () => {
     });
 
     test('resolves session via (channel,user) when private_metadata has no sessionId', async () => {
-      const ctx = encodeContext({ sessionId: '', channel: 'C1', userId: 'U1' });
+      const ctx = encodeContext({ channel: 'C1', sessionId: '', userId: 'U1' });
       await run([
         makeBaseEvent({
           type: 'view_submission',
@@ -258,7 +263,7 @@ describe('slack_interactivity', () => {
 
     test('returns expired-session error when session not found', async () => {
       mockedSessionStore.getSessionById.mockResolvedValue(null);
-      const ctx = encodeContext({ sessionId: 'gone', channel: 'C1' });
+      const ctx = encodeContext({ channel: 'C1', sessionId: 'gone' });
       const result = await run([
         makeBaseEvent({
           type: 'view_submission',
@@ -281,73 +286,21 @@ describe('slack_interactivity', () => {
   });
 
   test('rejects when signature validator fails', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const validator = require('../../../utils/slack-signature-validator');
-    validator.validateSlackSignature.mockReturnValueOnce({ valid: false, reason: 'bad' });
+    validator.validateSlackSignature.mockReturnValueOnce({ reason: 'bad', valid: false });
 
     const result = await run([
-      makeBaseEvent({ command: '/sda-feedback', trigger_id: 't', user_id: 'U', channel_id: 'C' }),
+      makeBaseEvent({ channel_id: 'C', command: '/sda-feedback', trigger_id: 't', user_id: 'U' }),
     ]);
     expect(result).toEqual({ status: 'forbidden', status_code: 403 });
     expect(mockedSlackClient.openView).not.toHaveBeenCalled();
   });
 
-  describe('block_actions: feedback prompt buttons', () => {
-    test('open button click → opens the modal directly with the click trigger_id', async () => {
-      mockedSlackClient.updateMessageBlocks.mockResolvedValue();
-      const ctxValue = encodeContext({
-        sessionId: 'sess-1',
-        channel: 'C1',
-        threadTs: 't1',
-        userId: 'U1',
-      });
-
-      const result = await run([
-        makeBaseEvent({
-          type: 'block_actions',
-          trigger_id: 'trig-click',
-          container: { channel_id: 'C1', message_ts: 'mts-1' },
-          actions: [{ action_id: ACTION_OPEN_FEEDBACK, value: ctxValue }],
-        }),
-      ]);
-
-      expect(mockedSlackClient.openView).toHaveBeenCalledWith(
-        'trig-click',
-        expect.objectContaining({
-          callback_id: FEEDBACK_VIEW_CALLBACK,
-          submit: expect.anything(),
-        }),
-        'xoxb-test'
-      );
-      expect(result.session_id).toBe('sess-1');
-    });
-
-    test('dismiss button → updates the prompt message to a "skipped" notice', async () => {
-      mockedSlackClient.updateMessageBlocks.mockResolvedValue();
-      const ctxValue = encodeContext({ sessionId: 'sess-1', channel: 'C1' });
-
-      const result = await run([
-        makeBaseEvent({
-          type: 'block_actions',
-          trigger_id: 'trig-dismiss',
-          container: { channel_id: 'C1', message_ts: 'mts-1' },
-          actions: [{ action_id: ACTION_DISMISS_FEEDBACK_PROMPT, value: ctxValue }],
-        }),
-      ]);
-
-      expect(mockedSlackClient.updateMessageBlocks).toHaveBeenCalledWith(
-        'C1',
-        'mts-1',
-        expect.any(String),
-        expect.any(Array),
-        'xoxb-test'
-      );
-      expect(mockedSlackClient.openView).not.toHaveBeenCalled();
-      expect(result.mode).toBe('feedback_prompt_dismissed');
-    });
-  });
-
-  test('ignores view_closed', async () => {
-    const r = await run([makeBaseEvent({ type: 'view_closed' })]);
-    expect(r.status).toBe('ignored');
+  test('ignores view_closed and block_actions', async () => {
+    const r1 = await run([makeBaseEvent({ type: 'view_closed' })]);
+    const r2 = await run([makeBaseEvent({ type: 'block_actions' })]);
+    expect(r1.status).toBe('ignored');
+    expect(r2.status).toBe('ignored');
   });
 });
