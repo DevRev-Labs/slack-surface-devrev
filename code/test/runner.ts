@@ -104,29 +104,35 @@ async function handleEvent(events: any[], isAsync: boolean, resp: Response) {
     resp.status(200).send();
   }
 
+  // Allow-list of functions exposed by this snap-in. Restricting the
+  // request-supplied function_name to keys of `functionFactory` (own
+  // properties only, no prototype lookups) prevents an attacker from
+  // dispatching to an unintended target via a crafted body — the
+  // CodeQL "Unvalidated dynamic method call" finding.
+  const allowedFunctionNames = new Set<string>(Object.keys(functionFactory));
+
   for (const event of events) {
     let result;
-    const functionName: FunctionFactoryType = event.execution_metadata.function_name as FunctionFactoryType;
-    if (functionName === undefined) {
+    const rawName: unknown = event.execution_metadata?.function_name;
+    if (typeof rawName !== 'string' || rawName.length === 0) {
       error = {
         err_msg: 'Function name not provided in event',
         err_type: RuntimeErrorType.FunctionNameNotProvided,
       } as RuntimeError;
       console.error(error.err_msg);
       receivedError = true;
+    } else if (!allowedFunctionNames.has(rawName)) {
+      error = {
+        err_msg: `Function ${rawName} not found in factory`,
+        err_type: RuntimeErrorType.FunctionNotFound,
+      } as RuntimeError;
+      console.error(error.err_msg);
+      receivedError = true;
     } else {
+      const functionName = rawName as FunctionFactoryType;
       const f = functionFactory[functionName];
       try {
-        if (f == undefined) {
-          error = {
-            err_msg: `Function ${event.execution_metadata.function_name} not found in factory`,
-            err_type: RuntimeErrorType.FunctionNotFound,
-          } as RuntimeError;
-          console.error(error.err_msg);
-          receivedError = true;
-        } else {
-          result = await run(f, [event]);
-        }
+        result = await run(f, [event]);
       } catch (e) {
         error = { error: e } as FunctionError;
         console.error(e);
