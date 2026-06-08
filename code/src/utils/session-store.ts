@@ -132,6 +132,11 @@ const TENANT_FRAGMENT_SCHEMA_SPEC = {
 // the API accepts today.
 const CONVERSATION_TYPE_SUPPORT = 'support';
 
+// Marks the conversation as originating from Slack so the DevRev UI
+// renders "Source: Slack" with the Slack icon/label instead of the
+// default "chat". DevRev's platform recognises the token "slack".
+const SOURCE_CHANNEL_SLACK = 'slack';
+
 const DEFAULT_TIMING: SessionTimingConfig = {
   absoluteTtlMs: 24 * 60 * 60 * 1000,
   idleTtlMs: 8 * 60 * 60 * 1000,
@@ -393,6 +398,12 @@ async function writeSession(config: StoreConfig, record: SessionRecord, isCreate
     const payload: Record<string, any> = {
       custom_fields: customFields,
       custom_schema_spec: TENANT_FRAGMENT_SCHEMA_SPEC,
+      // Tells DevRev the conversation originated from Slack — the UI
+      // renders "Source: Slack" with the Slack icon instead of "Chat".
+      // We intentionally don't set `source_channel_v2`: it expects a
+      // DevRev-internal Slack channel resource id (don:…/channels/…),
+      // not the raw Slack channel id, and we don't have one.
+      source_channel: SOURCE_CHANNEL_SLACK,
       title,
       type: CONVERSATION_TYPE_SUPPORT,
     };
