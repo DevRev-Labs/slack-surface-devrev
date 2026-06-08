@@ -1,10 +1,10 @@
-import { run } from '../index';
-import * as convStore from '../../../utils/conversation-store';
-import * as sessionStore from '../../../utils/session-store';
-import * as slackClient from '../../../utils/slack-client';
-import * as devrevAuth from '../../../utils/devrev-auth';
 import { FunctionInput } from '../../../types';
+import * as convStore from '../../../utils/conversation-store';
+import * as devrevAuth from '../../../utils/devrev-auth';
+import * as sessionStore from '../../../utils/session-store';
 import { SessionRecord } from '../../../utils/session-store';
+import * as slackClient from '../../../utils/slack-client';
+import { run } from '../index';
 
 jest.mock('../../../utils/conversation-store', () => {
   const actual = jest.requireActual('../../../utils/conversation-store');
@@ -43,80 +43,84 @@ const mockedDevrevAuth = devrevAuth as jest.Mocked<typeof devrevAuth>;
 
 function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {
-    objectId: 'co-1',
-    sessionId: 'uuid-current',
-    conversationKey: 'ck-1',
+    botUserId: 'UBOT00000',
     channel: 'C0123456789',
     channelName: 'general',
+    conversationKey: 'ck-1',
     conversationType: 'channel',
-    threadTs: '1705315800.000100',
+    createdAt: Date.now(),
+    devrevUserId: 'dev-user-123',
+    endReason: '',
+    expiresAt: Date.now() + 60_000,
+    feedbackRating: 0,
+    feedbackSubmittedAt: 0,
+    feedbackText: '',
+    generation: 0,
+    hardExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+    lastDeliveredTurn: 0,
+    lastUsedAt: Date.now(),
+    messageCount: 0,
     messageTs: '1705315800.000100',
+    objectId: 'co-1',
+    previousSessionId: '',
+    sessionId: 'uuid-current',
+    status: 'active',
     teamId: 'T0123456789',
+    tempMessageTs: '',
+    threadTs: '1705315800.000100',
+    userEmail: 'user@example.com',
     userId: 'U0123456789',
     userName: 'Alice',
-    userEmail: 'user@example.com',
-    botUserId: 'UBOT00000',
-    devrevUserId: 'dev-user-123',
-    tempMessageTs: '',
-    status: 'active',
-    generation: 0,
-    previousSessionId: '',
-    endReason: '',
-    messageCount: 0,
-    createdAt: Date.now(),
-    lastUsedAt: Date.now(),
-    expiresAt: Date.now() + 60_000,
-    hardExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
     ...overrides,
   };
 }
 
 describe('slack_handler', () => {
   const mockEvent: FunctionInput = {
-    payload: {
-      token: 'verification-token',
-      team_id: 'T0123456789',
-      api_app_id: 'A0123456789',
-      authorizations: [{ user_id: 'UBOT00000' }],
-      event: {
-        type: 'app_mention',
-        user: 'U0123456789',
-        text: '<@U9876543210> What is the status of my ticket?',
-        ts: '1705315800.000100',
-        channel: 'C0123456789',
-        event_ts: '1705315800.000100',
+    context: {
+      dev_oid: 'dev-1',
+      secrets: {
+        service_account_token: 'test-service-token',
       },
-      type: 'event_callback',
-      event_id: 'Ev0123456789',
-      event_time: 1705315800,
+      service_account_id: 'svc-1',
+      snap_in_id: 'snap-1',
+      snap_in_version_id: 'ver-1',
+      source_id: 'source-1',
     },
     execution_metadata: {
-      request_id: 'req-1',
       devrev_endpoint: 'https://api.devrev.ai',
-      function_name: 'slack_handler',
       event_type: 'custom:slack-message',
+      function_name: 'slack_handler',
+      request_id: 'req-1',
     },
     input_data: {
-      global_values: {
-        ai_agent_id: 'don:core:dvrv-us-1:devo/123:ai_agent/456',
-      },
       event_sources: {
         'ai-agent-events': 'event-source-id-456',
+      },
+      global_values: {
+        ai_agent_id: 'don:core:dvrv-us-1:devo/123:ai_agent/456',
       },
       keyrings: {
         slack_bot_token: 'xoxb-test-bot-token',
         slack_signing_secret: 'test-signing-secret',
       },
     },
-    context: {
-      dev_oid: 'dev-1',
-      source_id: 'source-1',
-      snap_in_id: 'snap-1',
-      snap_in_version_id: 'ver-1',
-      service_account_id: 'svc-1',
-      secrets: {
-        service_account_token: 'test-service-token',
+    payload: {
+      api_app_id: 'A0123456789',
+      authorizations: [{ user_id: 'UBOT00000' }],
+      event: {
+        channel: 'C0123456789',
+        event_ts: '1705315800.000100',
+        text: '<@U9876543210> What is the status of my ticket?',
+        ts: '1705315800.000100',
+        type: 'app_mention',
+        user: 'U0123456789',
       },
+      event_id: 'Ev0123456789',
+      event_time: 1705315800,
+      team_id: 'T0123456789',
+      token: 'verification-token',
+      type: 'event_callback',
     },
   };
 
@@ -125,9 +129,9 @@ describe('slack_handler', () => {
 
     mockedConvStore.extractConversationReference.mockReturnValue({
       channel: 'C0123456789',
-      userId: 'U0123456789',
       messageTs: '1705315800.000100',
       timestamp: Date.now(),
+      userId: 'U0123456789',
     });
     mockedConvStore.extractRoutingKeyParts.mockReturnValue({
       channel: 'C0123456789',
@@ -137,25 +141,25 @@ describe('slack_handler', () => {
 
     mockedSessionStore.buildConversationKey.mockReturnValue('ck-1');
     mockedSessionStore.getActiveSession.mockResolvedValue(null);
-    mockedSessionStore.createSession.mockImplementation(async (_, opts) => makeRecord({
-      sessionId: 'uuid-new',
-      conversationKey: opts.identity.conversationKey,
-      generation: 0,
-    }));
+    mockedSessionStore.createSession.mockImplementation(async (_, opts) =>
+      makeRecord({
+        conversationKey: opts.identity.conversationKey,
+        generation: 0,
+        sessionId: 'uuid-new',
+      })
+    );
     mockedSessionStore.rotateSession.mockImplementation(async (_, prev) =>
       makeRecord({
-        sessionId: 'uuid-rotated',
-        previousSessionId: prev.sessionId,
         generation: (prev.generation || 0) + 1,
+        previousSessionId: prev.sessionId,
+        sessionId: 'uuid-rotated',
       })
     );
     mockedSessionStore.touchSession.mockImplementation(async (_c, record) => record);
     mockedSessionStore.isSessionExpired.mockReturnValue(null);
 
     mockedSlackClient.sendMessage.mockResolvedValue('1705315801.000200');
-    mockedSlackClient.removeBotMention.mockImplementation((text) =>
-      text.replace(/<@[A-Z0-9]+>/gi, '').trim()
-    );
+    mockedSlackClient.removeBotMention.mockImplementation((text) => text.replace(/<@[A-Z0-9]+>/gi, '').trim());
     mockedSlackClient.getUserProfile.mockResolvedValue({
       email: 'user@example.com',
       name: 'Alice',
@@ -186,8 +190,8 @@ describe('slack_handler', () => {
     expect(mockExecuteAsync).toHaveBeenCalledWith(
       expect.objectContaining({
         agent: 'don:core:dvrv-us-1:devo/123:ai_agent/456',
-        session_object: 'co-1',
         client_metadata: expect.objectContaining({ session_id: 'uuid-new' }),
+        session_object: 'co-1',
       })
     );
 
@@ -197,9 +201,7 @@ describe('slack_handler', () => {
   });
 
   test('reuses an active session without rotating', async () => {
-    mockedSessionStore.getActiveSession.mockResolvedValue(
-      makeRecord({ sessionId: 'uuid-existing', messageCount: 2 })
-    );
+    mockedSessionStore.getActiveSession.mockResolvedValue(makeRecord({ messageCount: 2, sessionId: 'uuid-existing' }));
 
     const result = await run([mockEvent]);
 
@@ -209,9 +211,7 @@ describe('slack_handler', () => {
   });
 
   test('rotates session on idle timeout', async () => {
-    mockedSessionStore.getActiveSession.mockResolvedValue(
-      makeRecord({ sessionId: 'uuid-old' })
-    );
+    mockedSessionStore.getActiveSession.mockResolvedValue(makeRecord({ sessionId: 'uuid-old' }));
     mockedSessionStore.isSessionExpired.mockReturnValue('idle_timeout');
 
     await run([mockEvent]);
@@ -228,9 +228,7 @@ describe('slack_handler', () => {
 
   test('reset intent ("/clear") rotates without calling the AI Agent', async () => {
     mockedSlackClient.removeBotMention.mockReturnValue('/clear');
-    mockedSessionStore.getActiveSession.mockResolvedValue(
-      makeRecord({ sessionId: 'uuid-old' })
-    );
+    mockedSessionStore.getActiveSession.mockResolvedValue(makeRecord({ sessionId: 'uuid-old' }));
 
     const result = await run([mockEvent]);
 
@@ -261,9 +259,9 @@ describe('slack_handler', () => {
     expect(mockExecuteAsync).not.toHaveBeenCalled();
 
     expect(result).toEqual({
-      status: 'success',
       mode: 'new_session',
       session_id: 'uuid-rotated',
+      status: 'success',
     });
   });
 
@@ -288,9 +286,9 @@ describe('slack_handler', () => {
         ...mockEvent.payload,
         event: {
           ...mockEvent.payload.event,
-          type: 'message',
           channel_type: 'channel',
           text: 'just chatting, no mention',
+          type: 'message',
         },
       },
     };
@@ -305,19 +303,17 @@ describe('slack_handler', () => {
   });
 
   test('continues an active thread session when user replies without re-mentioning the bot', async () => {
-    mockedSessionStore.getActiveSession.mockResolvedValue(
-      makeRecord({ sessionId: 'uuid-active', messageCount: 3 })
-    );
+    mockedSessionStore.getActiveSession.mockResolvedValue(makeRecord({ messageCount: 3, sessionId: 'uuid-active' }));
     const event = {
       ...mockEvent,
       payload: {
         ...mockEvent.payload,
         event: {
           ...mockEvent.payload.event,
-          type: 'message',
           channel_type: 'channel',
-          thread_ts: '1705315700.000050',
           text: 'follow-up question, no mention',
+          thread_ts: '1705315700.000050',
+          type: 'message',
         },
       },
     };
@@ -346,8 +342,8 @@ describe('slack_handler', () => {
         ...mockEvent.payload,
         event: {
           ...mockEvent.payload.event,
-          type: 'app_mention',
           ts: '1705315900.000100',
+          type: 'app_mention',
         },
       },
     };
@@ -361,8 +357,8 @@ describe('slack_handler', () => {
         identity: expect.objectContaining({ threadTs: '1705315900.000100' }),
       }),
       expect.objectContaining({
-        idleTtlMs: expect.any(Number),
         absoluteTtlMs: expect.any(Number),
+        idleTtlMs: expect.any(Number),
       })
     );
   });
@@ -374,9 +370,9 @@ describe('slack_handler', () => {
         ...mockEvent.payload,
         event: {
           ...mockEvent.payload.event,
-          type: 'message',
           channel_type: 'im',
           text: 'hey bot',
+          type: 'message',
         },
       },
     };
@@ -468,10 +464,11 @@ describe('slack_handler', () => {
   });
 
   test('returns 403 when signature validation fails', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const validator = require('../../../utils/slack-signature-validator');
     validator.validateSlackSignature.mockReturnValueOnce({
-      valid: false,
       reason: 'Missing X-Slack-Signature header',
+      valid: false,
     });
 
     const result = await run([mockEvent]);
@@ -486,12 +483,13 @@ describe('slack_handler', () => {
       payload: {
         body: mockEvent.payload,
         headers: {
-          'x-slack-signature': 'v0=deadbeef',
           'x-slack-request-timestamp': String(Math.floor(Date.now() / 1000)),
+          'x-slack-signature': 'v0=deadbeef',
         },
       },
     };
 
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const validator = require('../../../utils/slack-signature-validator');
     validator.validateSlackSignature.mockClear();
 

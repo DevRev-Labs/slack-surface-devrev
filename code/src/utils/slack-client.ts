@@ -1,6 +1,6 @@
 /**
  * Slack Web API Client
- * 
+ *
  * Handles sending messages, updating messages, and fetching user information from Slack.
  */
 
@@ -59,19 +59,14 @@ export interface SlackUserProfile {
 
 /**
  * Send a message to a Slack channel.
- * 
+ *
  * @param channel The channel ID to send to.
  * @param text The message text.
  * @param botToken The Slack bot token.
  * @param threadTs Optional thread timestamp to reply in a thread.
  * @returns The message timestamp (ts) which serves as the message ID.
  */
-export async function sendMessage(
-  channel: string,
-  text: string,
-  botToken: string,
-  threadTs?: string
-): Promise<string> {
+export async function sendMessage(channel: string, text: string, botToken: string, threadTs?: string): Promise<string> {
   const payload: any = {
     channel,
     text,
@@ -82,22 +77,18 @@ export async function sendMessage(
   }
 
   try {
-    const response = await axios.post<SlackMessageResponse>(
-      `${SLACK_API_BASE}/chat.postMessage`,
-      payload,
-      {
-        headers: {
-          'Authorization': `Bearer ${botToken}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
+    const response = await axios.post<SlackMessageResponse>(`${SLACK_API_BASE}/chat.postMessage`, payload, {
+      headers: {
+        Authorization: `Bearer ${botToken}`,
+        'Content-Type': 'application/json',
+      },
+    });
 
     if (!response.data.ok) {
       throw new Error(`Slack API error: ${response.data.error}`);
     }
 
-    return response.data.ts!;
+    return response.data.ts ?? '';
   } catch (error: any) {
     console.error('Slack sendMessage error:', error.response?.data || error.message);
     throw new Error(`Failed to send message to Slack: ${error.message}`);
@@ -105,30 +96,105 @@ export async function sendMessage(
 }
 
 /**
+ * Send an ephemeral message — visible ONLY to the target user, never
+ * to others in the channel/thread. Backed by `chat.postEphemeral`.
+ *
+ * Used for the feedback confirmation so the submitter's rating and
+ * comment aren't broadcast to everyone in the conversation.
+ */
+export async function postEphemeral(
+  channel: string,
+  user: string,
+  text: string,
+  blocks: any[] | undefined,
+  botToken: string,
+  threadTs?: string
+): Promise<void> {
+  const payload: any = { channel, text, user };
+  if (blocks && blocks.length > 0) payload.blocks = blocks;
+  if (threadTs) payload.thread_ts = threadTs;
+
+  try {
+    const response = await axios.post<SlackMessageResponse>(`${SLACK_API_BASE}/chat.postEphemeral`, payload, {
+      headers: { Authorization: `Bearer ${botToken}`, 'Content-Type': 'application/json' },
+    });
+    if (!response.data.ok) {
+      throw new Error(`Slack API error: ${response.data.error}`);
+    }
+  } catch (error: any) {
+    console.error('Slack postEphemeral error:', error.response?.data || error.message);
+    throw new Error(`Failed to send ephemeral message: ${error.message}`);
+  }
+}
+
+/**
+ * Open a Slack modal via views.open. `triggerId` comes from a slash
+ * command or block_actions payload and is single-use with a ~3-second
+ * freshness window. Returns the view id so the caller can later
+ * `updateView` to swap the modal contents.
+ */
+export async function openView(triggerId: string, view: any, botToken: string): Promise<string> {
+  try {
+    const response = await axios.post<{
+      ok: boolean;
+      error?: string;
+      view?: { id?: string };
+    }>(
+      `${SLACK_API_BASE}/views.open`,
+      { trigger_id: triggerId, view },
+      { headers: { Authorization: `Bearer ${botToken}`, 'Content-Type': 'application/json' } }
+    );
+    if (!response.data.ok) {
+      throw new Error(`Slack API error: ${response.data.error}`);
+    }
+    return response.data.view?.id || '';
+  } catch (error: any) {
+    console.error('Slack openView error:', error.response?.data || error.message);
+    throw new Error(`Failed to open Slack view: ${error.message}`);
+  }
+}
+
+/**
+ * Replace an open modal's contents via views.update. Used to swap the
+ * loading modal for the real form (or for an error modal) after async
+ * work completes.
+ */
+export async function updateView(viewId: string, view: any, botToken: string): Promise<void> {
+  try {
+    const response = await axios.post<{ ok: boolean; error?: string }>(
+      `${SLACK_API_BASE}/views.update`,
+      { view, view_id: viewId },
+      { headers: { Authorization: `Bearer ${botToken}`, 'Content-Type': 'application/json' } }
+    );
+    if (!response.data.ok) {
+      throw new Error(`Slack API error: ${response.data.error}`);
+    }
+  } catch (error: any) {
+    console.error('Slack updateView error:', error.response?.data || error.message);
+    throw new Error(`Failed to update Slack view: ${error.message}`);
+  }
+}
+
+/**
  * Update an existing message in Slack.
- * 
+ *
  * @param channel The channel ID where the message is.
  * @param ts The timestamp of the message to update.
  * @param text The new message text.
  * @param botToken The Slack bot token.
  */
-export async function updateMessage(
-  channel: string,
-  ts: string,
-  text: string,
-  botToken: string
-): Promise<void> {
+export async function updateMessage(channel: string, ts: string, text: string, botToken: string): Promise<void> {
   try {
     const response = await axios.post<SlackMessageResponse>(
       `${SLACK_API_BASE}/chat.update`,
       {
         channel,
-        ts,
         text,
+        ts,
       },
       {
         headers: {
-          'Authorization': `Bearer ${botToken}`,
+          Authorization: `Bearer ${botToken}`,
           'Content-Type': 'application/json',
         },
       }
@@ -145,16 +211,12 @@ export async function updateMessage(
 
 /**
  * Delete a message from Slack.
- * 
+ *
  * @param channel The channel ID where the message is.
  * @param ts The timestamp of the message to delete.
  * @param botToken The Slack bot token.
  */
-export async function deleteMessage(
-  channel: string,
-  ts: string,
-  botToken: string
-): Promise<void> {
+export async function deleteMessage(channel: string, ts: string, botToken: string): Promise<void> {
   try {
     const response = await axios.post<SlackMessageResponse>(
       `${SLACK_API_BASE}/chat.delete`,
@@ -164,7 +226,7 @@ export async function deleteMessage(
       },
       {
         headers: {
-          'Authorization': `Bearer ${botToken}`,
+          Authorization: `Bearer ${botToken}`,
           'Content-Type': 'application/json',
         },
       }
@@ -183,35 +245,15 @@ export async function deleteMessage(
 }
 
 /**
- * Get user information from Slack, including their email address.
- *
- * @param userId The Slack user ID.
- * @param botToken The Slack bot token.
- * @returns The user's email address, or null if not found.
- */
-export async function getUserEmail(
-  userId: string,
-  botToken: string
-): Promise<string | null> {
-  return (await getUserProfile(userId, botToken)).email;
-}
-
-/**
  * Get the Slack user's profile (email + display name) in a single users.info call.
  * Returns nulls for fields that aren't available rather than throwing.
  */
-export async function getUserProfile(
-  userId: string,
-  botToken: string
-): Promise<SlackUserProfile> {
+export async function getUserProfile(userId: string, botToken: string): Promise<SlackUserProfile> {
   try {
-    const response = await axios.get<SlackUserResponse>(
-      `${SLACK_API_BASE}/users.info`,
-      {
-        params: { user: userId },
-        headers: { 'Authorization': `Bearer ${botToken}` },
-      }
-    );
+    const response = await axios.get<SlackUserResponse>(`${SLACK_API_BASE}/users.info`, {
+      headers: { Authorization: `Bearer ${botToken}` },
+      params: { user: userId },
+    });
 
     if (!response.data.ok) {
       console.error(`Slack users.info error: ${response.data.error}`);
@@ -219,12 +261,7 @@ export async function getUserProfile(
     }
 
     const user = response.data.user;
-    const name =
-      user?.profile?.display_name ||
-      user?.profile?.real_name ||
-      user?.real_name ||
-      user?.name ||
-      null;
+    const name = user?.profile?.display_name || user?.profile?.real_name || user?.real_name || user?.name || null;
     return {
       email: user?.profile?.email || null,
       name: name && name.trim() ? name.trim() : null,
@@ -239,19 +276,13 @@ export async function getUserProfile(
  * Resolve a Slack channel/conversation's human-readable name via conversations.info.
  * Returns null for DMs (no `name`) or on error.
  */
-export async function getChannelName(
-  channelId: string,
-  botToken: string
-): Promise<string | null> {
+export async function getChannelName(channelId: string, botToken: string): Promise<string | null> {
   if (!channelId) return null;
   try {
-    const response = await axios.get<SlackConversationResponse>(
-      `${SLACK_API_BASE}/conversations.info`,
-      {
-        params: { channel: channelId },
-        headers: { 'Authorization': `Bearer ${botToken}` },
-      }
-    );
+    const response = await axios.get<SlackConversationResponse>(`${SLACK_API_BASE}/conversations.info`, {
+      headers: { Authorization: `Bearer ${botToken}` },
+      params: { channel: channelId },
+    });
 
     if (!response.data.ok) {
       console.warn(`Slack conversations.info error for ${channelId}: ${response.data.error}`);
@@ -268,7 +299,7 @@ export async function getChannelName(
 /**
  * Remove bot mention from message text.
  * Slack formats bot mentions as <@BOT_ID>.
- * 
+ *
  * @param text The message text with potential bot mention.
  * @returns The cleaned message text.
  */

@@ -12,10 +12,15 @@ to ensure that proper testing and validation procedures are carried out before
 deploying any code into production environments.
 */
 
+import {
+  ExecuteOperationResult,
+  ExecuteOperationResult_SerializationFormat,
+  FunctionExecutionError,
+  OperationOutput,
+} from '@devrev/typescript-sdk/dist/snap-ins';
 import bodyParser from 'body-parser';
-import express, { Express, Handler, Request, Response } from 'express';
+import express, { Express, Request, Response } from 'express';
 
-import process from 'process';
 import { functionFactory, FunctionFactoryType } from '../src/function-factory';
 import { HTTPClient, HttpRequest } from './http_client';
 import {
@@ -31,17 +36,6 @@ import {
   SnapInsSystemUpdateRequestStatus,
   SnapInsSystemUpdateResponse,
 } from './types';
-
-
-import {
-  Context as SnapInContext,
-  ExecuteOperationResult,
-  ExecuteOperationResult_SerializationFormat,
-  ExecutionMetadata,
-  FunctionExecutionError,
-  FunctionInput,
-  OperationOutput,
-} from '@devrev/typescript-sdk/dist/snap-ins';
 
 const app: Express = express();
 app.use(bodyParser.json(), bodyParser.urlencoded({ extended: false }));
@@ -74,20 +68,20 @@ app.post('/handle/sync', async (req: Request, resp: Response) => {
 });
 
 async function run(f: any, event: any): Promise<any> {
-  let result = await f(event);
+  const result = await f(event);
   return result;
 }
 
 async function handleEvent(events: any[], isAsync: boolean, resp: Response) {
   let error;
-  let results: ExecutionResult[] = [];
+  const results: ExecutionResult[] = [];
   let receivedError = false;
 
   if (!Array.isArray(events)) {
-    let errMsg = 'Invalid request format: body is not an array';
+    const errMsg = 'Invalid request format: body is not an array';
     error = {
-      err_type: RuntimeErrorType.InvalidRequest,
       err_msg: errMsg,
+      err_type: RuntimeErrorType.InvalidRequest,
     } as RuntimeError;
     console.error(error.err_msg);
     resp.status(400).send(errMsg);
@@ -96,10 +90,10 @@ async function handleEvent(events: any[], isAsync: boolean, resp: Response) {
   // if the request is synchronous, there should be a single event
   if (!isAsync) {
     if (events.length > 1) {
-      let errMsg = 'Invalid request format: multiple events provided for synchronous request';
+      const errMsg = 'Invalid request format: multiple events provided for synchronous request';
       error = {
-        err_type: RuntimeErrorType.InvalidRequest,
         err_msg: errMsg,
+        err_type: RuntimeErrorType.InvalidRequest,
       } as RuntimeError;
       console.error(error.err_msg);
       resp.status(400).send(errMsg);
@@ -110,29 +104,35 @@ async function handleEvent(events: any[], isAsync: boolean, resp: Response) {
     resp.status(200).send();
   }
 
-  for (let event of events) {
+  // Allow-list of functions exposed by this snap-in. Restricting the
+  // request-supplied function_name to keys of `functionFactory` (own
+  // properties only, no prototype lookups) prevents an attacker from
+  // dispatching to an unintended target via a crafted body — the
+  // CodeQL "Unvalidated dynamic method call" finding.
+  const allowedFunctionNames = new Set<string>(Object.keys(functionFactory));
+
+  for (const event of events) {
     let result;
-    const functionName: FunctionFactoryType = event.execution_metadata.function_name as FunctionFactoryType;
-    if (functionName === undefined) {
+    const rawName: unknown = event.execution_metadata?.function_name;
+    if (typeof rawName !== 'string' || rawName.length === 0) {
       error = {
-        err_type: RuntimeErrorType.FunctionNameNotProvided,
         err_msg: 'Function name not provided in event',
+        err_type: RuntimeErrorType.FunctionNameNotProvided,
+      } as RuntimeError;
+      console.error(error.err_msg);
+      receivedError = true;
+    } else if (!allowedFunctionNames.has(rawName)) {
+      error = {
+        err_msg: `Function ${rawName} not found in factory`,
+        err_type: RuntimeErrorType.FunctionNotFound,
       } as RuntimeError;
       console.error(error.err_msg);
       receivedError = true;
     } else {
+      const functionName = rawName as FunctionFactoryType;
       const f = functionFactory[functionName];
       try {
-        if (f == undefined) {
-          error = {
-            err_type: RuntimeErrorType.FunctionNotFound,
-            err_msg: `Function ${event.execution_metadata.function_name} not found in factory`,
-          } as RuntimeError;
-          console.error(error.err_msg);
-          receivedError = true;
-        } else {
-          result = await run(f, [event]);
-        }
+        result = await run(f, [event]);
       } catch (e) {
         error = { error: e } as FunctionError;
         console.error(e);
@@ -144,7 +144,7 @@ async function handleEvent(events: any[], isAsync: boolean, resp: Response) {
     const opResult = await postRun(event, error, result);
 
     // Return result.
-    let res: ExecutionResult = {};
+    const res: ExecutionResult = {};
 
     if (opResult !== undefined) {
       res.function_result = opResult;
@@ -175,7 +175,7 @@ async function postRun(event: any, handlerError: HandlerError, result: any) {
   } else if (isDeactivateHook(event)) {
     handleDeactivateHookResult(event, handlerError, result);
   }
-  return undefined
+  return undefined;
 }
 
 function isActivateHook(event: any): boolean {
@@ -191,11 +191,11 @@ function isInvokedFromOperation(event: any): boolean {
 }
 
 function handleActivateHookResult(event: any, handlerError: HandlerError, result: any) {
-  let update_req: SnapInsSystemUpdateRequest = {
+  const update_req: SnapInsSystemUpdateRequest = {
     id: event.context.snap_in_id,
     status: SnapInsSystemUpdateRequestStatus.Active,
   };
-  let res = getActivateHookResult(result);
+  const res = getActivateHookResult(result);
   update_req.inputs_values = res.inputs_values;
 
   if (handlerError !== undefined || res?.status === 'error') {
@@ -207,11 +207,11 @@ function handleActivateHookResult(event: any, handlerError: HandlerError, result
 }
 
 function handleDeactivateHookResult(event: any, handlerError: HandlerError, result: any) {
-  let update_req: SnapInsSystemUpdateRequest = {
+  const update_req: SnapInsSystemUpdateRequest = {
     id: event.context.snap_in_id,
     status: SnapInsSystemUpdateRequestStatus.Inactive,
   };
-  let res = getDeactivateHookResult(result);
+  const res = getDeactivateHookResult(result);
   update_req.inputs_values = res.inputs_values;
   if (event.payload.force_deactivate) {
     console.debug('Snap-in is being force deactivated, errors ignored');
@@ -241,8 +241,8 @@ async function updateSnapInState(event: any, update_req: SnapInsSystemUpdateRequ
   });
 
   const request: HttpRequest = {
-    path: '/internal/snap-ins.system-update',
     body: update_req,
+    path: '/internal/snap-ins.system-update',
   };
 
   try {
@@ -253,7 +253,7 @@ async function updateSnapInState(event: any, update_req: SnapInsSystemUpdateRequ
 }
 
 function getActivateHookResult(input: any): ActivateHookResult {
-  let res = {} as ActivateHookResult;
+  const res = {} as ActivateHookResult;
   if (input instanceof Object) {
     if (input.status === 'active' || input.status === 'error') {
       res.status = input.status;
@@ -270,7 +270,7 @@ function getActivateHookResult(input: any): ActivateHookResult {
 }
 
 function getDeactivateHookResult(input: any): DeactivateHookResult {
-  let res = {} as DeactivateHookResult;
+  const res = {} as DeactivateHookResult;
   if (input instanceof Object) {
     if (input.status === 'inactive' || input.status === 'error') {
       res.status = input.status;
@@ -289,7 +289,7 @@ function getDeactivateHookResult(input: any): DeactivateHookResult {
 async function handleOperationInvocationResult(
   event: any,
   handlerError: HandlerError,
-  result: any,
+  result: any
 ): Promise<ExecuteOperationResult> {
   if (result === undefined) {
     result = generateOperationOutputFromError(handlerError);
@@ -305,16 +305,15 @@ async function handleOperationInvocationResult(
 
 function generateOperationOutputFromError(handlerError: HandlerError): OperationOutput {
   const errorDetails: FailedExecutionError = {
-    source: FailedExecutionErrorSource.DeveloperFunction,
     error:
       handlerError instanceof FunctionExecutionError
         ? handlerError
         : new FunctionExecutionError((handlerError as unknown as Error)?.message, false),
+    source: FailedExecutionErrorSource.DeveloperFunction,
   };
 
   return OperationOutput.fromJSON({ error: errorDetails }) as OperationOutput;
 }
-
 
 export enum FailedExecutionErrorSource {
   // Source of the error not known.
@@ -332,7 +331,7 @@ export type FailedExecutionError = {
 
 function createExecuteOperationResult(
   responseData: any,
-  format: ExecuteOperationResult_SerializationFormat,
+  format: ExecuteOperationResult_SerializationFormat
 ): ExecuteOperationResult {
   let data: string;
 
@@ -354,8 +353,8 @@ function createExecuteOperationResult(
   }
 
   return {
-    serialization_format: format,
     data: data,
+    serialization_format: format,
   } as ExecuteOperationResult;
 }
 

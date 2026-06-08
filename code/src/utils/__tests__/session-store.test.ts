@@ -1,36 +1,37 @@
 import axios from 'axios';
+import { SESSION_FIELD } from '../session-fields';
 import {
   buildConversationKey,
   createSession,
   deleteSession,
   endSession,
   getActiveSession,
-  getSessionById,
   getSessionByConversationId,
+  getSessionById,
   isSessionExpired,
   listHardExpiredSessions,
   listIdleExpiredSessions,
   patchSession,
-  rotateSession,
   recordToConversationReference,
-  touchSession,
-  StoreConfig,
+  rotateSession,
   SessionRecord,
+  StoreConfig,
+  touchSession,
   _resetSessionStoreCaches,
 } from '../session-store';
-import { SESSION_FIELD } from '../session-fields';
 
 jest.mock('axios');
 const mockedAxios = axios as jest.Mocked<typeof axios>;
 
 jest.mock('../devrev-auth', () => ({
-  getOrCreateActAsToken: jest.fn().mockResolvedValue(null),
   findUserByEmail: jest.fn(),
+  getOrCreateActAsToken: jest.fn().mockResolvedValue(null),
 }));
 
 const timing = {
-  idleTtlMs: 60 * 60 * 1000, // 1h
-  absoluteTtlMs: 24 * 60 * 60 * 1000, // 24h
+  // 1h
+  absoluteTtlMs: 24 * 60 * 60 * 1000,
+  idleTtlMs: 60 * 60 * 1000, // 24h
 };
 
 const config: StoreConfig = {
@@ -42,16 +43,16 @@ const config: StoreConfig = {
 const conversationKey = buildConversationKey('C0123456789', '1705315799.000050', 'U0123456789');
 
 const identity = {
-  conversationKey,
+  botUserId: 'UBOT00000',
   channel: 'C0123456789',
   channelName: 'general',
+  conversationKey,
   conversationType: 'channel',
-  threadTs: '1705315799.000050',
   messageTs: '1705315800.000100',
   teamId: 'T0123456789',
+  threadTs: '1705315799.000050',
   userId: 'U0123456789',
   userName: 'Alice',
-  botUserId: 'UBOT00000',
 };
 
 interface FieldsOverrides {
@@ -93,41 +94,41 @@ function fieldsForRecord(overrides: FieldsOverrides = {}) {
     [SESSION_FIELD.messageCount]: overrides.messageCount ?? 0,
     [SESSION_FIELD.createdAtMs]: new Date(overrides.createdAt ?? now).toISOString(),
     [SESSION_FIELD.lastUsedAtMs]: new Date(overrides.lastUsedAt ?? now).toISOString(),
-    [SESSION_FIELD.expiresAtMs]: new Date(
-      overrides.expiresAt ?? now + timing.idleTtlMs
-    ).toISOString(),
-    [SESSION_FIELD.hardExpiresAtMs]: new Date(
-      overrides.hardExpiresAt ?? now + timing.absoluteTtlMs
-    ).toISOString(),
+    [SESSION_FIELD.expiresAtMs]: new Date(overrides.expiresAt ?? now + timing.idleTtlMs).toISOString(),
+    [SESSION_FIELD.hardExpiresAtMs]: new Date(overrides.hardExpiresAt ?? now + timing.absoluteTtlMs).toISOString(),
   };
 }
 
 function emptyRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {
-    objectId: '',
-    sessionId: '',
-    conversationKey,
+    botUserId: '',
     channel: '',
     channelName: '',
+    conversationKey,
     conversationType: '',
-    threadTs: '',
+    createdAt: 0,
+    devrevUserId: '',
+    endReason: '',
+    expiresAt: 0,
+    feedbackRating: 0,
+    feedbackSubmittedAt: 0,
+    feedbackText: '',
+    generation: 0,
+    hardExpiresAt: 0,
+    lastDeliveredTurn: 0,
+    lastUsedAt: 0,
+    messageCount: 0,
     messageTs: '',
+    objectId: '',
+    previousSessionId: '',
+    sessionId: '',
+    status: 'active',
     teamId: '',
+    tempMessageTs: '',
+    threadTs: '',
+    userEmail: '',
     userId: '',
     userName: '',
-    userEmail: '',
-    botUserId: '',
-    devrevUserId: '',
-    tempMessageTs: '',
-    status: 'active',
-    generation: 0,
-    previousSessionId: '',
-    endReason: '',
-    messageCount: 0,
-    createdAt: 0,
-    lastUsedAt: 0,
-    expiresAt: 0,
-    hardExpiresAt: 0,
     ...overrides,
   };
 }
@@ -148,7 +149,7 @@ describe('session-store state machine', () => {
 
   test('createSession writes a conversation with active status, gen=0, full TTL window', async () => {
     mockedAxios.post.mockResolvedValueOnce({ data: { conversation: { id: 'conv-create' } } });
-    const record = await createSession(config, { identity, devrevUserId: 'du-1', userEmail: 'a@x.com' });
+    const record = await createSession(config, { devrevUserId: 'du-1', identity, userEmail: 'a@x.com' });
 
     expect(mockedAxios.post).toHaveBeenCalledTimes(1);
     const [url, body] = mockedAxios.post.mock.calls[0];
@@ -172,22 +173,22 @@ describe('session-store state machine', () => {
   test('touchSession rolls TTLs forward, increments messageCount, omits immutable session_id', async () => {
     mockedAxios.post.mockResolvedValueOnce({ data: {} });
     const record = emptyRecord({
-      objectId: 'conv-touch',
-      sessionId: 'uuid-touch',
+      botUserId: 'UBOT',
       channel: 'C',
       channelName: 'general',
       conversationType: 'channel',
-      threadTs: 't',
-      messageTs: 'm',
-      teamId: 'T',
-      userId: 'U',
-      userName: 'Alice',
-      botUserId: 'UBOT',
-      messageCount: 3,
       createdAt: Date.now() - 60_000,
-      lastUsedAt: Date.now() - 60_000,
       expiresAt: Date.now() - 60_000,
       hardExpiresAt: Date.now() + timing.absoluteTtlMs,
+      lastUsedAt: Date.now() - 60_000,
+      messageCount: 3,
+      messageTs: 'm',
+      objectId: 'conv-touch',
+      sessionId: 'uuid-touch',
+      teamId: 'T',
+      threadTs: 't',
+      userId: 'U',
+      userName: 'Alice',
     });
 
     const updated = await touchSession(config, record, timing, {
@@ -210,16 +211,16 @@ describe('session-store state machine', () => {
     mockedAxios.post.mockResolvedValueOnce({ data: {} });
     const baseExpiry = Date.now() + 30_000;
     const record = emptyRecord({
-      objectId: 'conv-p',
-      sessionId: 'uuid-p',
       channel: 'C',
-      userId: 'U',
-      tempMessageTs: 'old',
-      messageCount: 5,
       createdAt: Date.now(),
-      lastUsedAt: Date.now(),
       expiresAt: baseExpiry,
       hardExpiresAt: baseExpiry + 60_000,
+      lastUsedAt: Date.now(),
+      messageCount: 5,
+      objectId: 'conv-p',
+      sessionId: 'uuid-p',
+      tempMessageTs: 'old',
+      userId: 'U',
     });
 
     const updated = await patchSession(config, record, { tempMessageTs: null });
@@ -231,17 +232,17 @@ describe('session-store state machine', () => {
   test('endSession flips active → expired with idle_timeout, sets endReason', async () => {
     mockedAxios.post.mockResolvedValueOnce({ data: {} });
     const record = emptyRecord({
-      objectId: 'conv-end',
-      sessionId: 'uuid-end',
       channel: 'C',
-      userId: 'U',
-      generation: 1,
-      previousSessionId: 'uuid-prev',
-      messageCount: 2,
       createdAt: Date.now(),
-      lastUsedAt: Date.now(),
       expiresAt: Date.now(),
+      generation: 1,
       hardExpiresAt: Date.now() + 60_000,
+      lastUsedAt: Date.now(),
+      messageCount: 2,
+      objectId: 'conv-end',
+      previousSessionId: 'uuid-prev',
+      sessionId: 'uuid-end',
+      userId: 'U',
     });
 
     const updated = await endSession(config, record, 'idle_timeout');
@@ -261,26 +262,26 @@ describe('session-store state machine', () => {
       .mockResolvedValueOnce({ data: { conversation: { id: 'conv-new' } } });
 
     const previous = emptyRecord({
-      objectId: 'conv-prev',
-      sessionId: 'uuid-prev',
+      botUserId: 'UBOT',
       channel: 'C',
       channelName: 'general',
       conversationType: 'channel',
-      threadTs: 't',
+      createdAt: Date.now() - 1000,
+      devrevUserId: 'du-1',
+      expiresAt: Date.now() + 1000,
+      generation: 2,
+      hardExpiresAt: Date.now() + timing.absoluteTtlMs,
+      lastUsedAt: Date.now() - 500,
+      messageCount: 4,
       messageTs: 'm',
+      objectId: 'conv-prev',
+      previousSessionId: 'uuid-grand',
+      sessionId: 'uuid-prev',
       teamId: 'T',
+      threadTs: 't',
+      userEmail: 'a@x.com',
       userId: 'U',
       userName: 'Alice',
-      userEmail: 'a@x.com',
-      botUserId: 'UBOT',
-      devrevUserId: 'du-1',
-      generation: 2,
-      previousSessionId: 'uuid-grand',
-      messageCount: 4,
-      createdAt: Date.now() - 1000,
-      lastUsedAt: Date.now() - 500,
-      expiresAt: Date.now() + 1000,
-      hardExpiresAt: Date.now() + timing.absoluteTtlMs,
     });
 
     const next = await rotateSession(config, previous, 'absolute_timeout', {}, timing, {
@@ -305,10 +306,10 @@ describe('session-store state machine', () => {
   test('deleteSession calls /conversations.delete with the cached objectId', async () => {
     mockedAxios.post.mockResolvedValueOnce({ data: {} });
     const record = emptyRecord({
+      endReason: 'absolute_timeout',
       objectId: 'conv-del',
       sessionId: 'uuid-del',
       status: 'expired',
-      endReason: 'absolute_timeout',
     });
     await deleteSession(config, record);
     const [url, body] = mockedAxios.post.mock.calls[0];
@@ -333,32 +334,32 @@ describe('session-store state machine', () => {
 
   test('getActiveSession lists conversations, filters by conversationKey + status=active, picks latest', async () => {
     const stale = {
-      id: 'conv-old',
       custom_fields: fieldsForRecord({
+        lastUsedAt: 100,
         sessionId: 'uuid-old',
         status: 'active',
-        lastUsedAt: 100,
       }),
+      id: 'conv-old',
     };
     const recent = {
-      id: 'conv-new',
       custom_fields: fieldsForRecord({
+        lastUsedAt: 9_999_999_999_999,
         sessionId: 'uuid-new',
         status: 'active',
-        lastUsedAt: 9_999_999_999_999,
       }),
+      id: 'conv-new',
     };
     const wrongKey = {
-      id: 'conv-wrong',
       custom_fields: fieldsForRecord({
+        conversationKey: 'different-key',
         sessionId: 'uuid-wrong',
         status: 'active',
-        conversationKey: 'different-key',
       }),
+      id: 'conv-wrong',
     };
     const ended = {
-      id: 'conv-ended',
       custom_fields: fieldsForRecord({ sessionId: 'uuid-ended', status: 'ended' }),
+      id: 'conv-ended',
     };
 
     mockedAxios.post.mockResolvedValueOnce({ data: { conversations: [stale, recent, wrongKey, ended] } });
@@ -373,8 +374,8 @@ describe('session-store state machine', () => {
 
   test('getSessionById hits /conversations.list to find by tnt__session_id when not cached', async () => {
     const conv = {
-      id: 'conv-by-id',
       custom_fields: fieldsForRecord({ sessionId: 'uuid-x' }),
+      id: 'conv-by-id',
     };
     mockedAxios.post.mockResolvedValueOnce({ data: { conversations: [conv] } });
     const r = await getSessionById(config, 'uuid-x');
@@ -384,52 +385,47 @@ describe('session-store state machine', () => {
 
   test('getSessionByConversationId hits /conversations.get with the DON', async () => {
     const matching = {
-      id: 'don:core:dvrv-us-1:devo/x:conversation/123',
       custom_fields: fieldsForRecord({
         sessionId: 'uuid-match',
       }),
+      id: 'don:core:dvrv-us-1:devo/x:conversation/123',
     };
     mockedAxios.post.mockResolvedValueOnce({ data: { conversation: matching } });
-    const r = await getSessionByConversationId(
-      config,
-      'don:core:dvrv-us-1:devo/x:conversation/123'
-    );
+    const r = await getSessionByConversationId(config, 'don:core:dvrv-us-1:devo/x:conversation/123');
     expect(r?.sessionId).toBe('uuid-match');
     expect(mockedAxios.post.mock.calls[0][0]).toContain('/conversations.get');
-    expect((mockedAxios.post.mock.calls[0][1] as any).id).toBe(
-      'don:core:dvrv-us-1:devo/x:conversation/123'
-    );
+    expect((mockedAxios.post.mock.calls[0][1] as any).id).toBe('don:core:dvrv-us-1:devo/x:conversation/123');
   });
 
   test('listIdleExpiredSessions returns active rows whose idle TTL elapsed but not absolute', async () => {
     const past = Date.now() - 60_000;
     const future = Date.now() + 60_000;
     const idle = {
-      id: 'conv-idle',
       custom_fields: fieldsForRecord({
+        expiresAt: past,
+        hardExpiresAt: future,
         sessionId: 'uuid-idle',
         status: 'active',
-        expiresAt: past,
-        hardExpiresAt: future,
       }),
+      id: 'conv-idle',
     };
     const fresh = {
-      id: 'conv-fresh',
       custom_fields: fieldsForRecord({
-        sessionId: 'uuid-fresh',
-        status: 'active',
         expiresAt: future,
         hardExpiresAt: future + 60_000,
+        sessionId: 'uuid-fresh',
+        status: 'active',
       }),
+      id: 'conv-fresh',
     };
     const inactive = {
-      id: 'conv-inactive',
       custom_fields: fieldsForRecord({
-        sessionId: 'uuid-inactive',
-        status: 'expired',
         expiresAt: past,
         hardExpiresAt: future,
+        sessionId: 'uuid-inactive',
+        status: 'expired',
       }),
+      id: 'conv-inactive',
     };
     mockedAxios.post.mockResolvedValueOnce({ data: { conversations: [idle, fresh, inactive] } });
     const res = await listIdleExpiredSessions(config);
@@ -441,28 +437,28 @@ describe('session-store state machine', () => {
     const past = Date.now() - 60_000;
     const future = Date.now() + 60_000;
     const hardActive = {
-      id: 'conv-hard-a',
       custom_fields: fieldsForRecord({
+        hardExpiresAt: past,
         sessionId: 'uuid-hard-a',
         status: 'active',
-        hardExpiresAt: past,
       }),
+      id: 'conv-hard-a',
     };
     const hardExpired = {
-      id: 'conv-hard-e',
       custom_fields: fieldsForRecord({
+        hardExpiresAt: past - 1000,
         sessionId: 'uuid-hard-e',
         status: 'expired',
-        hardExpiresAt: past - 1000,
       }),
+      id: 'conv-hard-e',
     };
     const fresh = {
-      id: 'conv-fresh',
       custom_fields: fieldsForRecord({
+        hardExpiresAt: future,
         sessionId: 'uuid-fresh',
         status: 'active',
-        hardExpiresAt: future,
       }),
+      id: 'conv-fresh',
     };
     mockedAxios.post.mockResolvedValueOnce({ data: { conversations: [hardActive, hardExpired, fresh] } });
     const res = await listHardExpiredSessions(config);
@@ -471,22 +467,22 @@ describe('session-store state machine', () => {
 
   test('recordToConversationReference maps SessionRecord to ConversationReference shape', () => {
     const record = emptyRecord({
-      objectId: 'conv-x',
-      sessionId: 'uuid-x',
+      botUserId: 'UBOT',
       channel: 'C0123456789',
       channelName: 'general',
       conversationType: 'channel',
-      threadTs: 't',
+      createdAt: 1700000000000,
+      devrevUserId: 'du-1',
+      lastUsedAt: 1700000001000,
       messageTs: 'm',
+      objectId: 'conv-x',
+      sessionId: 'uuid-x',
       teamId: 'T0123456789',
+      tempMessageTs: 'temp',
+      threadTs: 't',
+      userEmail: 'a@x.com',
       userId: 'U0123456789',
       userName: 'Alice',
-      userEmail: 'a@x.com',
-      botUserId: 'UBOT',
-      devrevUserId: 'du-1',
-      tempMessageTs: 'temp',
-      createdAt: 1700000000000,
-      lastUsedAt: 1700000001000,
     });
     const ref = recordToConversationReference(record);
     expect(ref.channel).toBe('C0123456789');
@@ -498,10 +494,7 @@ describe('session-store state machine', () => {
   });
 
   test('returns null when store is not configured', async () => {
-    const result = await getSessionById(
-      { devrevEndpoint: '', serviceAccountToken: '' },
-      'uuid-z'
-    );
+    const result = await getSessionById({ devrevEndpoint: '', serviceAccountToken: '' }, 'uuid-z');
     expect(result).toBeNull();
     expect(mockedAxios.post).not.toHaveBeenCalled();
   });

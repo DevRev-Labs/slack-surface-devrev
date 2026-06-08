@@ -181,7 +181,9 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
       `Sorry, something went wrong. Please try again or contact your admin.`,
       config.slackBotToken,
       slackEvent.thread_ts || undefined
-    ).catch(() => {});
+    ).catch(() => {
+      /* swallow */
+    });
     return { reason: 'Invalid mock email address format in config', status: 'error' };
   }
 
@@ -263,7 +265,9 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
           `Sorry, something went wrong. Please try again or contact your admin.`,
           config.slackBotToken,
           slackEvent.thread_ts || undefined
-        ).catch(() => {});
+        ).catch(() => {
+          /* swallow */
+        });
         return { reason: 'User not in DevRev org', status: 'ignored' };
       }
 
@@ -419,7 +423,9 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
         'Sorry, I encountered an error processing your request. Please try again.',
         config.slackBotToken,
         threadTs
-      ).catch(() => {});
+      ).catch(() => {
+        /* swallow */
+      });
     }
 
     return {

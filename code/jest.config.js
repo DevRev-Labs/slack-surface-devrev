@@ -1,16 +1,8 @@
 module.exports = {
   collectCoverage: true,
-  collectCoverageFrom: [
-    'src/functions/**/*.ts',
-    'src/utils/**/*.ts',
-    '!src/**/*.test.ts',
-    '!src/**/__tests__/**',
-  ],
+  collectCoverageFrom: ['src/functions/**/*.ts', 'src/utils/**/*.ts', '!src/**/*.test.ts', '!src/**/__tests__/**'],
   coverageDirectory: 'coverage',
-  coveragePathIgnorePatterns: [
-    '/node_modules/',
-    '/dist/',
-  ],
+  coveragePathIgnorePatterns: ['/node_modules/', '/dist/'],
   coverageReporters: ['text'],
   coverageThreshold: {
     '**/*': {
@@ -19,8 +11,5 @@ module.exports = {
   },
   preset: 'ts-jest',
   testEnvironment: 'node',
-  testPathIgnorePatterns: [
-    '/node_modules/',
-    '/dist/',
-  ],
+  testPathIgnorePatterns: ['/node_modules/', '/dist/'],
 };

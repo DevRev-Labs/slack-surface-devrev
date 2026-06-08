@@ -1,62 +1,66 @@
-import { run } from '../index';
-import * as sessionStore from '../../../utils/session-store';
 import { FunctionInput } from '../../../types';
+import * as sessionStore from '../../../utils/session-store';
 import { SessionRecord } from '../../../utils/session-store';
+import { run } from '../index';
 
 jest.mock('../../../utils/session-store');
 const mockedSessionStore = sessionStore as jest.Mocked<typeof sessionStore>;
 
 function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {
-    objectId: 'co-1',
-    sessionId: 'uuid-1',
-    conversationKey: 'ck',
+    botUserId: '',
     channel: 'C',
     channelName: '',
+    conversationKey: 'ck',
     conversationType: '',
-    threadTs: '',
+    createdAt: 0,
+    devrevUserId: '',
+    endReason: '',
+    expiresAt: 0,
+    feedbackRating: 0,
+    feedbackSubmittedAt: 0,
+    feedbackText: '',
+    generation: 0,
+    hardExpiresAt: 0,
+    lastDeliveredTurn: 0,
+    lastUsedAt: 0,
+    messageCount: 0,
     messageTs: '',
+    objectId: 'co-1',
+    previousSessionId: '',
+    sessionId: 'uuid-1',
+    status: 'active',
     teamId: '',
+    tempMessageTs: '',
+    threadTs: '',
+    userEmail: '',
     userId: 'U',
     userName: '',
-    userEmail: '',
-    botUserId: '',
-    devrevUserId: '',
-    tempMessageTs: '',
-    status: 'active',
-    generation: 0,
-    previousSessionId: '',
-    endReason: '',
-    messageCount: 0,
-    createdAt: 0,
-    lastUsedAt: 0,
-    expiresAt: 0,
-    hardExpiresAt: 0,
     ...overrides,
   };
 }
 
 const mockEvent: FunctionInput = {
-  payload: { event_key: 'session-gc-tick' },
-  execution_metadata: {
-    request_id: 'req-gc',
-    devrev_endpoint: 'https://api.devrev.ai',
-    function_name: 'session_gc',
-    event_type: 'timer.tick',
-  },
-  input_data: {
-    global_values: { ai_agent_id: '' },
-    event_sources: {},
-    keyrings: {},
-  },
   context: {
     dev_oid: 'dev-1',
-    source_id: 'source-1',
+    secrets: { service_account_token: 'svc-token' },
+    service_account_id: 'svc-1',
     snap_in_id: 'snap-1',
     snap_in_version_id: 'ver-1',
-    service_account_id: 'svc-1',
-    secrets: { service_account_token: 'svc-token' },
+    source_id: 'source-1',
   },
+  execution_metadata: {
+    devrev_endpoint: 'https://api.devrev.ai',
+    event_type: 'timer.tick',
+    function_name: 'session_gc',
+    request_id: 'req-gc',
+  },
+  input_data: {
+    event_sources: {},
+    global_values: { ai_agent_id: '' },
+    keyrings: {},
+  },
+  payload: { event_key: 'session-gc-tick' },
 };
 
 describe('session_gc', () => {
@@ -74,28 +78,24 @@ describe('session_gc', () => {
 
     const result = await run([mockEvent]);
 
-    expect(mockedSessionStore.endSession).toHaveBeenCalledWith(
-      expect.anything(),
-      idle,
-      'idle_timeout'
-    );
+    expect(mockedSessionStore.endSession).toHaveBeenCalledWith(expect.anything(), idle, 'idle_timeout');
     expect(mockedSessionStore.deleteSession).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ status: 'success', idle_marked: 1, sessions_deleted: 0 });
+    expect(result).toMatchObject({ idle_marked: 1, sessions_deleted: 0, status: 'success' });
   });
 
   test('hard pass deletes records past absolute timeout', async () => {
     const hard = makeRecord({
+      endReason: 'idle_timeout',
       objectId: 'co-hard',
       sessionId: 'uuid-hard',
       status: 'expired',
-      endReason: 'idle_timeout',
     });
     mockedSessionStore.listHardExpiredSessions.mockResolvedValue([hard]);
 
     const result = await run([mockEvent]);
 
     expect(mockedSessionStore.deleteSession).toHaveBeenCalledWith(expect.anything(), hard);
-    expect(result).toMatchObject({ status: 'success', idle_marked: 0, sessions_deleted: 1 });
+    expect(result).toMatchObject({ idle_marked: 0, sessions_deleted: 1, status: 'success' });
   });
 
   test('runs both passes in one tick', async () => {
@@ -108,7 +108,7 @@ describe('session_gc', () => {
 
     expect(mockedSessionStore.endSession).toHaveBeenCalledTimes(1);
     expect(mockedSessionStore.deleteSession).toHaveBeenCalledTimes(1);
-    expect(result).toMatchObject({ status: 'success', idle_marked: 1, sessions_deleted: 1 });
+    expect(result).toMatchObject({ idle_marked: 1, sessions_deleted: 1, status: 'success' });
   });
 
   test('skips hard-expired records with no objectId (cannot delete)', async () => {
@@ -123,14 +123,14 @@ describe('session_gc', () => {
 
   test('returns success with zero counts when there is nothing to do', async () => {
     const result = await run([mockEvent]);
-    expect(result).toMatchObject({ status: 'success', idle_marked: 0, sessions_deleted: 0 });
+    expect(result).toMatchObject({ idle_marked: 0, sessions_deleted: 0, status: 'success' });
   });
 
   test('returns error when devrev config is missing', async () => {
     const event = {
       ...mockEvent,
-      execution_metadata: { ...mockEvent.execution_metadata, devrev_endpoint: '' },
       context: { ...mockEvent.context, secrets: { service_account_token: '' } },
+      execution_metadata: { ...mockEvent.execution_metadata, devrev_endpoint: '' },
     };
     const result = await run([event]);
     expect(result.status).toBe('error');

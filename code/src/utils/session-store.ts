@@ -59,6 +59,10 @@ export interface SessionRecord {
   lastUsedAt: number;
   expiresAt: number;
   hardExpiresAt: number;
+  feedbackRating: number;
+  feedbackText: string;
+  feedbackSubmittedAt: number;
+  lastDeliveredTurn: number;
 }
 
 export interface StoreConfig {
@@ -104,6 +108,10 @@ export interface SessionPatch {
   botUserId?: string;
   devrevUserId?: string;
   tempMessageTs?: string | null;
+  feedbackRating?: number;
+  feedbackText?: string;
+  feedbackSubmittedAt?: number;
+  lastDeliveredTurn?: number;
 }
 
 // Maps `sessionId → DevRev conversation id`. Avoids the list-then-filter
@@ -123,6 +131,11 @@ const TENANT_FRAGMENT_SCHEMA_SPEC = {
 // `conversations.create` requires a `type` and "support" is the only value
 // the API accepts today.
 const CONVERSATION_TYPE_SUPPORT = 'support';
+
+// Marks the conversation as originating from Slack so the DevRev UI
+// renders "Source: Slack" with the Slack icon/label instead of the
+// default "chat". DevRev's platform recognises the token "slack".
+const SOURCE_CHANNEL_SLACK = 'slack';
 
 const DEFAULT_TIMING: SessionTimingConfig = {
   absoluteTtlMs: 24 * 60 * 60 * 1000,
@@ -239,6 +252,10 @@ function sessionCustomFields(record: SessionRecord): Record<string, any> {
     [SESSION_FIELD.lastUsedAtMs]: epochMsToIso(record.lastUsedAt),
     [SESSION_FIELD.expiresAtMs]: epochMsToIso(record.expiresAt),
     [SESSION_FIELD.hardExpiresAtMs]: epochMsToIso(record.hardExpiresAt),
+    [SESSION_FIELD.feedbackRating]: record.feedbackRating || undefined,
+    [SESSION_FIELD.feedbackText]: trimText(record.feedbackText),
+    [SESSION_FIELD.feedbackSubmittedAtMs]: epochMsToIso(record.feedbackSubmittedAt),
+    [SESSION_FIELD.lastDeliveredTurn]: record.lastDeliveredTurn || undefined,
   });
 }
 
@@ -247,58 +264,66 @@ function recordFromConversation(conversation: any): SessionRecord | null {
   const fields = conversation.custom_fields || {};
   if (!fields || Object.keys(fields).length === 0) return null;
   return mergeRecord(conversation.id || '', {
+    botUserId: asString(fields[SESSION_FIELD.botUserId]) || '',
     channel: asString(fields[SESSION_FIELD.channel]) || '',
     channelName: asString(fields[SESSION_FIELD.channelName]) || '',
-    botUserId: asString(fields[SESSION_FIELD.botUserId]) || '',
     conversationKey: asString(fields[SESSION_FIELD.conversationKey]) || '',
     conversationType: asString(fields[SESSION_FIELD.conversationType]) || '',
-    devrevUserId: asString(fields[SESSION_FIELD.devrevUserId]) || '',
-    generation: asNumber(fields[SESSION_FIELD.generation]) ?? 0,
-    messageTs: asString(fields[SESSION_FIELD.messageTs]) || '',
-    endReason: (asString(fields[SESSION_FIELD.endReason]) as SessionEndReason) || '',
-    sessionId: asString(fields[SESSION_FIELD.sessionId]) || '',
     createdAt: asEpochMs(fields[SESSION_FIELD.createdAtMs]) ?? 0,
-    teamId: asString(fields[SESSION_FIELD.teamId]) || '',
+    devrevUserId: asString(fields[SESSION_FIELD.devrevUserId]) || '',
+    endReason: (asString(fields[SESSION_FIELD.endReason]) as SessionEndReason) || '',
     expiresAt: asEpochMs(fields[SESSION_FIELD.expiresAtMs]) ?? 0,
-    threadTs: asString(fields[SESSION_FIELD.threadTs]) || '',
+    feedbackRating: asNumber(fields[SESSION_FIELD.feedbackRating]) ?? 0,
+    feedbackSubmittedAt: asEpochMs(fields[SESSION_FIELD.feedbackSubmittedAtMs]) ?? 0,
+    feedbackText: asString(fields[SESSION_FIELD.feedbackText]) || '',
+    generation: asNumber(fields[SESSION_FIELD.generation]) ?? 0,
     hardExpiresAt: asEpochMs(fields[SESSION_FIELD.hardExpiresAtMs]) ?? 0,
-    userEmail: asString(fields[SESSION_FIELD.userEmail]) || '',
+    lastDeliveredTurn: asNumber(fields[SESSION_FIELD.lastDeliveredTurn]) ?? 0,
     lastUsedAt: asEpochMs(fields[SESSION_FIELD.lastUsedAtMs]) ?? 0,
-    userId: asString(fields[SESSION_FIELD.userId]) || '',
     messageCount: asNumber(fields[SESSION_FIELD.messageCount]) ?? 0,
-    userName: asString(fields[SESSION_FIELD.userName]) || '',
+    messageTs: asString(fields[SESSION_FIELD.messageTs]) || '',
     previousSessionId: asString(fields[SESSION_FIELD.previousSessionId]) || '',
+    sessionId: asString(fields[SESSION_FIELD.sessionId]) || '',
     status: (asString(fields[SESSION_FIELD.status]) as SessionStatus) || 'active',
+    teamId: asString(fields[SESSION_FIELD.teamId]) || '',
     tempMessageTs: asString(fields[SESSION_FIELD.tempMessageTs]) || '',
+    threadTs: asString(fields[SESSION_FIELD.threadTs]) || '',
+    userEmail: asString(fields[SESSION_FIELD.userEmail]) || '',
+    userId: asString(fields[SESSION_FIELD.userId]) || '',
+    userName: asString(fields[SESSION_FIELD.userName]) || '',
   });
 }
 
 function mergeRecord(objectId: string, partial: Partial<SessionRecord>): SessionRecord {
   return {
+    botUserId: partial.botUserId || '',
     channel: partial.channel || '',
     channelName: partial.channelName || '',
     conversationKey: partial.conversationKey || '',
-    botUserId: partial.botUserId || '',
     conversationType: partial.conversationType || '',
-    devrevUserId: partial.devrevUserId || '',
-    messageTs: partial.messageTs || '',
-    generation: typeof partial.generation === 'number' ? partial.generation : 0,
-    objectId,
-    endReason: (partial.endReason as SessionEndReason) || '',
-    sessionId: partial.sessionId || '',
     createdAt: typeof partial.createdAt === 'number' ? partial.createdAt : Date.now(),
-    teamId: partial.teamId || '',
+    devrevUserId: partial.devrevUserId || '',
+    endReason: (partial.endReason as SessionEndReason) || '',
     expiresAt: typeof partial.expiresAt === 'number' ? partial.expiresAt : Date.now(),
-    threadTs: partial.threadTs || '',
+    feedbackRating: typeof partial.feedbackRating === 'number' ? partial.feedbackRating : 0,
+    feedbackSubmittedAt: typeof partial.feedbackSubmittedAt === 'number' ? partial.feedbackSubmittedAt : 0,
+    feedbackText: partial.feedbackText || '',
+    generation: typeof partial.generation === 'number' ? partial.generation : 0,
     hardExpiresAt: typeof partial.hardExpiresAt === 'number' ? partial.hardExpiresAt : Date.now(),
-    userEmail: partial.userEmail || '',
+    lastDeliveredTurn: typeof partial.lastDeliveredTurn === 'number' ? partial.lastDeliveredTurn : 0,
     lastUsedAt: typeof partial.lastUsedAt === 'number' ? partial.lastUsedAt : Date.now(),
-    userId: partial.userId || '',
     messageCount: typeof partial.messageCount === 'number' ? partial.messageCount : 0,
-    userName: partial.userName || '',
+    messageTs: partial.messageTs || '',
+    objectId,
     previousSessionId: partial.previousSessionId || '',
+    sessionId: partial.sessionId || '',
     status: (partial.status as SessionStatus) || 'active',
+    teamId: partial.teamId || '',
     tempMessageTs: partial.tempMessageTs || '',
+    threadTs: partial.threadTs || '',
+    userEmail: partial.userEmail || '',
+    userId: partial.userId || '',
+    userName: partial.userName || '',
   };
 }
 
@@ -373,6 +398,12 @@ async function writeSession(config: StoreConfig, record: SessionRecord, isCreate
     const payload: Record<string, any> = {
       custom_fields: customFields,
       custom_schema_spec: TENANT_FRAGMENT_SCHEMA_SPEC,
+      // Tells DevRev the conversation originated from Slack — the UI
+      // renders "Source: Slack" with the Slack icon instead of "Chat".
+      // We intentionally don't set `source_channel_v2`: it expects a
+      // DevRev-internal Slack channel resource id (don:…/channels/…),
+      // not the raw Slack channel id, and we don't have one.
+      source_channel: SOURCE_CHANNEL_SLACK,
       title,
       type: CONVERSATION_TYPE_SUPPORT,
     };
@@ -468,6 +499,29 @@ export async function getActiveSession(config: StoreConfig, conversationKey: str
 }
 
 /**
+ * Slash-command lookup: a `/sda-feedback` invocation has no thread_ts, so the
+ * conversation_key path can't be used. Instead, scan active sessions for
+ * (channel, userId) and return the most-recently-used. Returns null when
+ * the user has no active session in this channel.
+ */
+export async function getLatestActiveSessionForUserInChannel(
+  config: StoreConfig,
+  channel: string,
+  userId: string
+): Promise<SessionRecord | null> {
+  if (!isStoreConfigured(config) || !channel || !userId) return null;
+  const all = await listSessionRecords(config);
+  let latest: SessionRecord | null = null;
+  for (const record of all) {
+    if (record.status !== 'active') continue;
+    if (record.channel !== channel) continue;
+    if (record.userId !== userId) continue;
+    if (!latest || record.lastUsedAt > latest.lastUsedAt) latest = record;
+  }
+  return latest;
+}
+
+/**
  * Find the active session whose backing DevRev conversation DON matches.
  * Used by the timeline_entry_created fallback path in ai_response_handler —
  * those events arrive without our client_metadata so the only handle is the
@@ -497,28 +551,28 @@ export async function createSession(
   const now = Date.now();
   const sessionId = randomUUID();
   const record: SessionRecord = mergeRecord('', {
-    channel: options.identity.channel,
     botUserId: options.identity.botUserId,
+    channel: options.identity.channel,
     channelName: options.identity.channelName,
     conversationKey: options.identity.conversationKey,
     conversationType: options.identity.conversationType,
-    devrevUserId: options.devrevUserId || '',
-    generation: typeof options.generation === 'number' ? options.generation : 0,
-    messageTs: options.identity.messageTs,
-    endReason: '',
-    sessionId,
     createdAt: now,
-    status: 'active',
+    devrevUserId: options.devrevUserId || '',
+    endReason: '',
     expiresAt: now + timing.idleTtlMs,
-    teamId: options.identity.teamId,
+    generation: typeof options.generation === 'number' ? options.generation : 0,
     hardExpiresAt: now + timing.absoluteTtlMs,
-    threadTs: options.identity.threadTs,
     lastUsedAt: now,
-    userId: options.identity.userId,
     messageCount: 0,
-    userName: options.identity.userName,
+    messageTs: options.identity.messageTs,
     previousSessionId: options.previousSessionId || '',
+    sessionId,
+    status: 'active',
+    teamId: options.identity.teamId,
+    threadTs: options.identity.threadTs,
     userEmail: options.userEmail || '',
+    userId: options.identity.userId,
+    userName: options.identity.userName,
   });
   await writeSession(config, record, true);
   if (record.conversationKey) {
@@ -536,12 +590,16 @@ export async function touchSession(
   const now = Date.now();
   const updated: SessionRecord = {
     ...record,
+    botUserId: patch.botUserId ?? record.botUserId,
     channelName: patch.channelName ?? record.channelName,
     conversationType: patch.conversationType ?? record.conversationType,
-    botUserId: patch.botUserId ?? record.botUserId,
-    expiresAt: now + timing.idleTtlMs,
     devrevUserId: patch.devrevUserId ?? record.devrevUserId,
+    expiresAt: now + timing.idleTtlMs,
+    feedbackRating: patch.feedbackRating ?? record.feedbackRating,
+    feedbackSubmittedAt: patch.feedbackSubmittedAt ?? record.feedbackSubmittedAt,
+    feedbackText: patch.feedbackText ?? record.feedbackText,
     hardExpiresAt: record.hardExpiresAt || now + timing.absoluteTtlMs,
+    lastDeliveredTurn: patch.lastDeliveredTurn ?? record.lastDeliveredTurn,
     lastUsedAt: now,
     messageCount: (record.messageCount || 0) + 1,
     messageTs: patch.messageTs ?? record.messageTs,
@@ -571,6 +629,10 @@ export async function patchSession(
     channelName: patch.channelName ?? record.channelName,
     conversationType: patch.conversationType ?? record.conversationType,
     devrevUserId: patch.devrevUserId ?? record.devrevUserId,
+    feedbackRating: patch.feedbackRating ?? record.feedbackRating,
+    feedbackSubmittedAt: patch.feedbackSubmittedAt ?? record.feedbackSubmittedAt,
+    feedbackText: patch.feedbackText ?? record.feedbackText,
+    lastDeliveredTurn: patch.lastDeliveredTurn ?? record.lastDeliveredTurn,
     messageTs: patch.messageTs ?? record.messageTs,
     teamId: patch.teamId ?? record.teamId,
     tempMessageTs: patch.tempMessageTs === null ? '' : patch.tempMessageTs ?? record.tempMessageTs,
@@ -619,8 +681,8 @@ export async function rotateSession(
       devrevUserId: identityExtras.devrevUserId || previous.devrevUserId,
       generation: (previous.generation || 0) + 1,
       identity: {
-        channel: identityPatch.channel || previous.channel,
         botUserId: identityPatch.botUserId ?? previous.botUserId,
+        channel: identityPatch.channel || previous.channel,
         channelName: identityPatch.channelName ?? previous.channelName,
         conversationKey: identityPatch.conversationKey || previous.conversationKey,
         conversationType: identityPatch.conversationType ?? previous.conversationType,

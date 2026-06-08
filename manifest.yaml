@@ -79,8 +79,8 @@ keyrings:
 event_sources:
   organization:
     - name: slack-webhook-source
-      description: Receives events from Slack Events API.
-      display_name: Slack Events Webhook
+      description: Single Slack webhook — receives Events API, slash commands, and Block-Kit interactivity.
+      display_name: Slack Webhook
       type: flow-custom-webhook
       config:
         policy: |
@@ -88,9 +88,11 @@ event_sources:
 
           import future.keywords.if
 
-          # Handle Slack URL verification challenge inline so Slack's setup
-          # flow succeeds even though the function rejects unsigned bodies.
+          # URL verification — answered inline so the Slack Events
+          # setup flow succeeds. Body must be an object for `.type` to
+          # be valid in Rego; guard explicitly.
           output = {"response": response} if {
+            is_object(input.request.body)
             input.request.body.type == "url_verification"
             response := {
               "status_code": 200,
@@ -99,61 +101,84 @@ event_sources:
             }
           }
 
-          # Forward POST bodies + headers + body_raw to the function.
-          # body_raw is base64-encoded raw request bytes — required for the
-          # function to recompute Slack's HMAC (HMAC-SHA256 over the exact
-          # bytes Slack signed). HMAC verification happens in slack_handler
-          # — see code/src/utils/slack-signature-validator.ts.
-          # We must not gate on header presence in Rego: missing signatures
-          # must reach the function so it can return a clean 403.
-          output = {"event": event, "event_key": event_key} if {
+          # Events API JSON callbacks (app_mention, message.im, etc.)
+          # → slack_handler.
+          output = {"event": event, "event_key": "slack-message"} if {
             input.request.method == "POST"
+            is_object(input.request.body)
             input.request.body.type == "event_callback"
             event := {
               "body": input.request.body,
               "body_raw": input.request.body_raw,
               "headers": input.request.headers
             }
-            event_key := "slack-message"
           }
 
-          # Reject other requests
-          output = {"response": response} if {
-            not input.request.body.type == "url_verification"
-            not input.request.body.type == "event_callback"
-            response := {
-              "status_code": 400,
-              "body": "Invalid request"
+          # Slash commands & Block-Kit interactivity → slack_interactivity.
+          # Catches every POST that isn't an Events JSON callback or a URL
+          # verification, regardless of body shape.
+          output = {"event": event, "event_key": "slack-interactivity"} if {
+            input.request.method == "POST"
+            not is_event_callback
+            not is_url_verification
+            event := {
+              "body": input.request.body,
+              "body_raw": input.request.body_raw,
+              "headers": input.request.headers
             }
+          }
+
+          is_event_callback if {
+            is_object(input.request.body)
+            input.request.body.type == "event_callback"
+          }
+
+          is_url_verification if {
+            is_object(input.request.body)
+            input.request.body.type == "url_verification"
           }
       setup_instructions: |
         ## Slack App Setup
-        
+
+        **Your Request URL** (use the same URL everywhere below):
+
+        `{{ source.trigger_url }}`
+
         1. Create a Slack App at [api.slack.com/apps](https://api.slack.com/apps):
            - Click "Create New App" > "From scratch"
            - Name your app and select your workspace
-        
+
         2. Configure Bot Token Scopes (OAuth & Permissions):
            - `chat:write` - Send and update messages
            - `users:read` - Get user information
            - `users:read.email` - Access user email addresses
            - `app_mentions:read` - Receive @mentions
-        
+           - `commands` - Required for the `/sda-feedback` slash command
+
         3. Enable Event Subscriptions:
            - Turn on "Enable Events"
-           - Set Request URL to: `{{ source.trigger_url }}`
+           - Paste the Request URL above
            - Subscribe to bot events: `app_mention`
            - Optionally add: `message.im` for direct messages
-        
-        4. Install the app to your workspace:
+
+        4. Slash Commands → Create New Command:
+           - Command: `/sda-feedback`
+           - Paste the same Request URL above
+           - Short description: "Share feedback on the SDA Agent"
+
+        5. Interactivity & Shortcuts:
+           - Toggle Interactivity ON
+           - Paste the same Request URL above
+
+        6. Install the app to your workspace:
            - Go to "Install App" and click "Install to Workspace"
            - Copy the **Bot User OAuth Token** (starts with `xoxb-`)
-        
-        5. Get the Signing Secret:
+
+        7. Get the Signing Secret:
            - Go to "Basic Information"
            - Copy the **Signing Secret**
-        
-        6. Enter both tokens during snap-in installation.
+
+        8. Enter both tokens during snap-in installation.
 
     # Native DevRev event source for AI Agent responses
     - name: ai-agent-events
@@ -177,6 +202,9 @@ functions:
   - name: slack_handler
     description: Handles incoming messages from Slack and forwards them to AI Agents.
 
+  - name: slack_interactivity
+    description: Handles Slack Block-Kit button clicks and modal submissions (e.g. the feedback form).
+
   - name: ai_response_handler
     description: Handles async responses from AI Agents and sends them back to Slack.
 
@@ -197,6 +225,13 @@ automations:
     event_types:
       - custom:slack-message
     function: slack_handler
+
+  - name: handle-slack-interactivity
+    description: Process Slack slash commands and Block-Kit interactions (buttons, modals)
+    source: slack-webhook-source
+    event_types:
+      - custom:slack-interactivity
+    function: slack_interactivity
 
   - name: handle-ai-response
     description: Process AI Agent responses and send to Slack
