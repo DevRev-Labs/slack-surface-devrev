@@ -59,6 +59,10 @@ export interface SessionRecord {
   lastUsedAt: number;
   expiresAt: number;
   hardExpiresAt: number;
+  feedbackRating: number;
+  feedbackText: string;
+  feedbackSubmittedAt: number;
+  lastDeliveredTurn: number;
 }
 
 export interface StoreConfig {
@@ -104,6 +108,10 @@ export interface SessionPatch {
   botUserId?: string;
   devrevUserId?: string;
   tempMessageTs?: string | null;
+  feedbackRating?: number;
+  feedbackText?: string;
+  feedbackSubmittedAt?: number;
+  lastDeliveredTurn?: number;
 }
 
 // Maps `sessionId → DevRev conversation id`. Avoids the list-then-filter
@@ -239,6 +247,10 @@ function sessionCustomFields(record: SessionRecord): Record<string, any> {
     [SESSION_FIELD.lastUsedAtMs]: epochMsToIso(record.lastUsedAt),
     [SESSION_FIELD.expiresAtMs]: epochMsToIso(record.expiresAt),
     [SESSION_FIELD.hardExpiresAtMs]: epochMsToIso(record.hardExpiresAt),
+    [SESSION_FIELD.feedbackRating]: record.feedbackRating || undefined,
+    [SESSION_FIELD.feedbackText]: trimText(record.feedbackText),
+    [SESSION_FIELD.feedbackSubmittedAtMs]: epochMsToIso(record.feedbackSubmittedAt),
+    [SESSION_FIELD.lastDeliveredTurn]: record.lastDeliveredTurn || undefined,
   });
 }
 
@@ -270,6 +282,10 @@ function recordFromConversation(conversation: any): SessionRecord | null {
     previousSessionId: asString(fields[SESSION_FIELD.previousSessionId]) || '',
     status: (asString(fields[SESSION_FIELD.status]) as SessionStatus) || 'active',
     tempMessageTs: asString(fields[SESSION_FIELD.tempMessageTs]) || '',
+    feedbackRating: asNumber(fields[SESSION_FIELD.feedbackRating]) ?? 0,
+    feedbackText: asString(fields[SESSION_FIELD.feedbackText]) || '',
+    feedbackSubmittedAt: asEpochMs(fields[SESSION_FIELD.feedbackSubmittedAtMs]) ?? 0,
+    lastDeliveredTurn: asNumber(fields[SESSION_FIELD.lastDeliveredTurn]) ?? 0,
   });
 }
 
@@ -299,6 +315,10 @@ function mergeRecord(objectId: string, partial: Partial<SessionRecord>): Session
     previousSessionId: partial.previousSessionId || '',
     status: (partial.status as SessionStatus) || 'active',
     tempMessageTs: partial.tempMessageTs || '',
+    feedbackRating: typeof partial.feedbackRating === 'number' ? partial.feedbackRating : 0,
+    feedbackText: partial.feedbackText || '',
+    feedbackSubmittedAt: typeof partial.feedbackSubmittedAt === 'number' ? partial.feedbackSubmittedAt : 0,
+    lastDeliveredTurn: typeof partial.lastDeliveredTurn === 'number' ? partial.lastDeliveredTurn : 0,
   };
 }
 
@@ -468,6 +488,29 @@ export async function getActiveSession(config: StoreConfig, conversationKey: str
 }
 
 /**
+ * Slash-command lookup: a `/sda-feedback` invocation has no thread_ts, so the
+ * conversation_key path can't be used. Instead, scan active sessions for
+ * (channel, userId) and return the most-recently-used. Returns null when
+ * the user has no active session in this channel.
+ */
+export async function getLatestActiveSessionForUserInChannel(
+  config: StoreConfig,
+  channel: string,
+  userId: string
+): Promise<SessionRecord | null> {
+  if (!isStoreConfigured(config) || !channel || !userId) return null;
+  const all = await listSessionRecords(config);
+  let latest: SessionRecord | null = null;
+  for (const record of all) {
+    if (record.status !== 'active') continue;
+    if (record.channel !== channel) continue;
+    if (record.userId !== userId) continue;
+    if (!latest || record.lastUsedAt > latest.lastUsedAt) latest = record;
+  }
+  return latest;
+}
+
+/**
  * Find the active session whose backing DevRev conversation DON matches.
  * Used by the timeline_entry_created fallback path in ai_response_handler —
  * those events arrive without our client_metadata so the only handle is the
@@ -550,6 +593,10 @@ export async function touchSession(
     threadTs: patch.threadTs ?? record.threadTs,
     userEmail: patch.userEmail ?? record.userEmail,
     userName: patch.userName ?? record.userName,
+    feedbackRating: patch.feedbackRating ?? record.feedbackRating,
+    feedbackText: patch.feedbackText ?? record.feedbackText,
+    feedbackSubmittedAt: patch.feedbackSubmittedAt ?? record.feedbackSubmittedAt,
+    lastDeliveredTurn: patch.lastDeliveredTurn ?? record.lastDeliveredTurn,
   };
   await writeSession(config, updated, false);
   return updated;
@@ -577,6 +624,10 @@ export async function patchSession(
     threadTs: patch.threadTs ?? record.threadTs,
     userEmail: patch.userEmail ?? record.userEmail,
     userName: patch.userName ?? record.userName,
+    feedbackRating: patch.feedbackRating ?? record.feedbackRating,
+    feedbackText: patch.feedbackText ?? record.feedbackText,
+    feedbackSubmittedAt: patch.feedbackSubmittedAt ?? record.feedbackSubmittedAt,
+    lastDeliveredTurn: patch.lastDeliveredTurn ?? record.lastDeliveredTurn,
   };
   await writeSession(config, updated, false);
   return updated;

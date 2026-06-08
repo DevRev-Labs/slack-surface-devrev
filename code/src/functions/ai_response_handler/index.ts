@@ -183,6 +183,25 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
     return { reason: 'Suggestions event', status: 'ignored' };
   }
 
+  // Per-turn dedup. The AI Agent occasionally emits a follow-up
+  // `message` (and trailing `progress`) for the same user turn — Slack
+  // would render each as a separate reply while DevRev's timeline
+  // dedups via external_ref. Once we've delivered a final response for
+  // the current turn (lastDeliveredTurn === messageCount), drop any
+  // further `message`/`progress` and any final-message fall-through.
+  // `error` events are still allowed through so users see failures.
+  const turnAlreadyDelivered =
+    !!sessionRecord &&
+    sessionRecord.messageCount > 0 &&
+    sessionRecord.lastDeliveredTurn >= sessionRecord.messageCount;
+
+  if (turnAlreadyDelivered && agentResponseType !== 'error') {
+    console.log(
+      `[${requestId}] [AI_RESP] dropping duplicate event (type=${agentResponseType ?? 'final-message'}) for turn=${sessionRecord!.messageCount} (already delivered)`
+    );
+    return { reason: 'Duplicate event for delivered turn', status: 'ignored' };
+  }
+
   // Handle progress events — update the temp message
   if (agentResponseType === 'progress') {
     const progress = payload.ai_agent_response?.progress || payload.progress;
@@ -315,6 +334,18 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
         threadTs ?? 'none'
       }`
     );
+
+    // Stamp the turn we just delivered so any follow-up `message` or
+    // `progress` events for the same turn get dropped (see dedup at top).
+    if (sessionRecord) {
+      sessionRecord = await safePatch(
+        storeConfig,
+        sessionRecord,
+        { lastDeliveredTurn: sessionRecord.messageCount },
+        requestId,
+        'mark turn delivered'
+      );
+    }
 
     // Mirror the agent reply onto the session's conversation timeline.
     await mirrorAgentResponseToTimeline(storeConfig, sessionRecord, responseText, requestId);

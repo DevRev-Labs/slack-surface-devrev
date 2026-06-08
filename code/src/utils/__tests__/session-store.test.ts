@@ -128,6 +128,10 @@ function emptyRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     lastUsedAt: 0,
     expiresAt: 0,
     hardExpiresAt: 0,
+    feedbackRating: 0,
+    feedbackText: '',
+    feedbackSubmittedAt: 0,
+    lastDeliveredTurn: 0,
     ...overrides,
   };
 }

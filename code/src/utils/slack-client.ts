@@ -59,7 +59,7 @@ export interface SlackUserProfile {
 
 /**
  * Send a message to a Slack channel.
- * 
+ *
  * @param channel The channel ID to send to.
  * @param text The message text.
  * @param botToken The Slack bot token.
@@ -101,6 +101,120 @@ export async function sendMessage(
   } catch (error: any) {
     console.error('Slack sendMessage error:', error.response?.data || error.message);
     throw new Error(`Failed to send message to Slack: ${error.message}`);
+  }
+}
+
+/**
+ * Send a Block-Kit message. `text` is used as the fallback (notification)
+ * text shown in alerts and accessibility readers — Slack rejects messages
+ * with blocks but no fallback.
+ */
+export async function sendBlocksMessage(
+  channel: string,
+  text: string,
+  blocks: any[],
+  botToken: string,
+  threadTs?: string
+): Promise<string> {
+  const payload: any = { channel, text, blocks };
+  if (threadTs) payload.thread_ts = threadTs;
+
+  try {
+    const response = await axios.post<SlackMessageResponse>(
+      `${SLACK_API_BASE}/chat.postMessage`,
+      payload,
+      { headers: { Authorization: `Bearer ${botToken}`, 'Content-Type': 'application/json' } }
+    );
+    if (!response.data.ok) {
+      throw new Error(`Slack API error: ${response.data.error}`);
+    }
+    return response.data.ts!;
+  } catch (error: any) {
+    console.error('Slack sendBlocksMessage error:', error.response?.data || error.message);
+    throw new Error(`Failed to send blocks message to Slack: ${error.message}`);
+  }
+}
+
+/**
+ * Replace an existing message's blocks (and fallback text). Used to
+ * collapse the feedback prompt into a confirmation/cancellation note
+ * after the user submits or cancels the modal.
+ */
+export async function updateMessageBlocks(
+  channel: string,
+  ts: string,
+  text: string,
+  blocks: any[],
+  botToken: string
+): Promise<void> {
+  try {
+    const response = await axios.post<SlackMessageResponse>(
+      `${SLACK_API_BASE}/chat.update`,
+      { channel, ts, text, blocks },
+      { headers: { Authorization: `Bearer ${botToken}`, 'Content-Type': 'application/json' } }
+    );
+    if (!response.data.ok) {
+      throw new Error(`Slack API error: ${response.data.error}`);
+    }
+  } catch (error: any) {
+    console.error('Slack updateMessageBlocks error:', error.response?.data || error.message);
+    throw new Error(`Failed to update blocks message: ${error.message}`);
+  }
+}
+
+/**
+ * Open a Slack modal via views.open. `triggerId` comes from a slash
+ * command or block_actions payload and is single-use with a ~3-second
+ * freshness window. Returns the view id so the caller can later
+ * `updateView` to swap the modal contents.
+ */
+export async function openView(
+  triggerId: string,
+  view: any,
+  botToken: string
+): Promise<string> {
+  try {
+    const response = await axios.post<{
+      ok: boolean;
+      error?: string;
+      view?: { id?: string };
+    }>(
+      `${SLACK_API_BASE}/views.open`,
+      { trigger_id: triggerId, view },
+      { headers: { Authorization: `Bearer ${botToken}`, 'Content-Type': 'application/json' } }
+    );
+    if (!response.data.ok) {
+      throw new Error(`Slack API error: ${response.data.error}`);
+    }
+    return response.data.view?.id || '';
+  } catch (error: any) {
+    console.error('Slack openView error:', error.response?.data || error.message);
+    throw new Error(`Failed to open Slack view: ${error.message}`);
+  }
+}
+
+/**
+ * Replace an open modal's contents via views.update. Used to swap the
+ * loading modal for the real form (or for an error modal) after async
+ * work completes.
+ */
+export async function updateView(
+  viewId: string,
+  view: any,
+  botToken: string
+): Promise<void> {
+  try {
+    const response = await axios.post<{ ok: boolean; error?: string }>(
+      `${SLACK_API_BASE}/views.update`,
+      { view_id: viewId, view },
+      { headers: { Authorization: `Bearer ${botToken}`, 'Content-Type': 'application/json' } }
+    );
+    if (!response.data.ok) {
+      throw new Error(`Slack API error: ${response.data.error}`);
+    }
+  } catch (error: any) {
+    console.error('Slack updateView error:', error.response?.data || error.message);
+    throw new Error(`Failed to update Slack view: ${error.message}`);
   }
 }
 
