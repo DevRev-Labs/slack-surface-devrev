@@ -272,15 +272,29 @@ async function handleBlockActions(
     return { reason: 'Missing trigger_id', status: 'error' };
   }
 
+  // Two-stage pattern (matches the slash-command flow). The fast path
+  // tryFastPathBlockActions normally handles this before we get here;
+  // this slow path stays as a safety net for body-shape edge cases.
+  let viewId: string;
   try {
-    // Open the real form directly — sessionId is already in ctx, so no
-    // DevRev round-trip is needed during the 3s trigger_id window.
-    await openView(payload.trigger_id, buildFeedbackModal(ctx), slackBotToken);
-    console.log(`[${requestId}] [block_actions] feedback modal opened session=${ctx.sessionId}`);
+    viewId = await openView(payload.trigger_id, buildLoadingModal(), slackBotToken);
+    console.log(`[${requestId}] [block_actions] loading modal opened view_id=${viewId}`);
+  } catch (error: unknown) {
+    console.error(`[${requestId}] [block_actions] views.open (loading) failed: ${errMsg(error)}`);
+    return { details: errMsg(error), reason: 'views.open failed', status: 'error' };
+  }
+
+  if (!viewId) {
+    return { reason: 'No view id', status: 'error' };
+  }
+
+  try {
+    await updateView(viewId, buildFeedbackModal(ctx), slackBotToken);
+    console.log(`[${requestId}] [block_actions] real form rendered session=${ctx.sessionId}`);
     return { mode: 'feedback_modal_opened', session_id: ctx.sessionId, status: 'success' };
   } catch (error: unknown) {
-    console.error(`[${requestId}] [block_actions] views.open failed: ${errMsg(error)}`);
-    return { details: errMsg(error), reason: 'views.open failed', status: 'error' };
+    console.error(`[${requestId}] [block_actions] views.update failed: ${errMsg(error)}`);
+    return { details: errMsg(error), reason: 'views.update failed', status: 'error' };
   }
 }
 
@@ -596,13 +610,35 @@ async function tryFastPathBlockActions(
     return null;
   }
 
+  // Two-stage pattern (matches the slash-command flow). views.open
+  // with a tiny Loading modal consumes the 3-second trigger_id budget
+  // even on cold starts (~50ms payload, no DevRev round-trip). The
+  // returned view_id has no expiry — we then call views.update to
+  // swap in the real form. This is the same trick that makes the
+  // /sda-feedback flow reliable; applying it here gives the button
+  // the same reliability.
+  let viewId: string;
   try {
-    await openView(click.trigger_id, buildFeedbackModal(ctx), slackBotToken);
-    console.log(`[${requestId}] [block_actions] fast-path: feedback modal opened session=${ctx.sessionId}`);
+    viewId = await openView(click.trigger_id, buildLoadingModal(), slackBotToken);
+    console.log(`[${requestId}] [block_actions] fast-path: loading modal opened view_id=${viewId}`);
+  } catch (error: unknown) {
+    console.error(`[${requestId}] [block_actions] fast-path views.open (loading) failed: ${errMsg(error)}`);
+    return { details: errMsg(error), reason: 'views.open failed', status: 'error' };
+  }
+
+  if (!viewId) {
+    console.warn(`[${requestId}] [block_actions] fast-path: no view id returned`);
+    return { reason: 'No view id', status: 'error' };
+  }
+
+  // Stage 2: swap in the real form. view_id is durable, no clock to race.
+  try {
+    await updateView(viewId, buildFeedbackModal(ctx), slackBotToken);
+    console.log(`[${requestId}] [block_actions] fast-path: real form rendered session=${ctx.sessionId}`);
     return { mode: 'feedback_modal_opened', session_id: ctx.sessionId, status: 'success' };
   } catch (error: unknown) {
-    console.error(`[${requestId}] [block_actions] fast-path views.open failed: ${errMsg(error)}`);
-    return { details: errMsg(error), reason: 'views.open failed', status: 'error' };
+    console.error(`[${requestId}] [block_actions] fast-path views.update failed: ${errMsg(error)}`);
+    return { details: errMsg(error), reason: 'views.update failed', status: 'error' };
   }
 }
 

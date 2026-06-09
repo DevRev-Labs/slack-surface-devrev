@@ -341,7 +341,7 @@ describe('slack_interactivity', () => {
     expect(r.status).toBe('ignored');
   });
 
-  test('block_actions: feedback prompt button click opens the modal pre-bound to ctx', async () => {
+  test('block_actions: opens loading modal first, then updates with real form (two-stage)', async () => {
     const ctxValue = encodeContext({ channel: 'C-ended', sessionId: 'sess-ended', userId: 'U1' });
     const result = await run([
       makeBaseEvent({
@@ -350,8 +350,21 @@ describe('slack_interactivity', () => {
         type: 'block_actions',
       }),
     ]);
+    // Stage 1: trigger_id consumed by views.open with the loading shell
+    // (no submit button — only the real form has one).
     expect(mockedSlackClient.openView).toHaveBeenCalledWith(
       'trig-click',
+      expect.objectContaining({
+        callback_id: FEEDBACK_VIEW_CALLBACK,
+        close: expect.anything(),
+      }),
+      'xoxb-test'
+    );
+    const openCall = mockedSlackClient.openView.mock.calls[0];
+    expect(openCall[1].submit).toBeUndefined();
+    // Stage 2: views.update swapped in the real form (which has submit).
+    expect(mockedSlackClient.updateView).toHaveBeenCalledWith(
+      'view-id-1',
       expect.objectContaining({
         callback_id: FEEDBACK_VIEW_CALLBACK,
         submit: expect.anything(),
