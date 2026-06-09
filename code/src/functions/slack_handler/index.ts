@@ -40,6 +40,17 @@ const FORBIDDEN_RESPONSE = { status: 'forbidden', status_code: 403 };
 
 const RESET_INTENT_PHRASES = new Set(['new session', '/clear']);
 
+function readSlackHeader(headers: Record<string, any> | undefined, name: string): string | undefined {
+  if (!headers) return undefined;
+  const target = name.toLowerCase();
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === target) {
+      return Array.isArray(v) ? String(v[0] ?? '') : String(v ?? '');
+    }
+  }
+  return undefined;
+}
+
 /**
  * Find or create the right session for this Slack message.
  *
@@ -124,6 +135,21 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
   if (!sigCheck.valid) {
     console.warn(`[${requestId}] [auth] Slack signature rejected: ${sigCheck.reason}`);
     return FORBIDDEN_RESPONSE;
+  }
+
+  // Slack retries Events API delivery if it doesn't get a 200 within ~3s.
+  // Cold-start latency can blow that budget on the first call; the retry
+  // then races the original invocation and produces a duplicate placeholder
+  // + a duplicate AI-Agent submission. The original is still in-flight, so
+  // we ack the retry with 200 and exit before any Slack call or session
+  // write happens.
+  const retryNum = readSlackHeader(requestHeaders, 'x-slack-retry-num');
+  if (retryNum) {
+    const retryReason = readSlackHeader(requestHeaders, 'x-slack-retry-reason');
+    console.log(
+      `[${requestId}] [retry] dropping Slack retry attempt=${retryNum} reason=${retryReason ?? 'unspecified'}`
+    );
+    return { reason: 'Slack retry — original in flight', status: 'ignored' };
   }
 
   const slackEvent = slackBody?.event;
