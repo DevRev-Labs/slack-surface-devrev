@@ -96,6 +96,36 @@ export async function sendMessage(channel: string, text: string, botToken: strin
 }
 
 /**
+ * Send a Block-Kit message into a channel/thread. Used by session_gc to
+ * post the "Submit your feedback" prompt when a session idle-expires.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function sendBlocksMessage(
+  channel: string,
+  text: string,
+  blocks: any[],
+  botToken: string,
+  threadTs?: string
+): Promise<string> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const payload: any = { blocks, channel, text };
+  if (threadTs) payload.thread_ts = threadTs;
+
+  try {
+    const response = await axios.post<SlackMessageResponse>(`${SLACK_API_BASE}/chat.postMessage`, payload, {
+      headers: { Authorization: `Bearer ${botToken}`, 'Content-Type': 'application/json' },
+    });
+    if (!response.data.ok) {
+      throw new Error(`Slack API error: ${response.data.error}`);
+    }
+    return response.data.ts ?? '';
+  } catch (error: any) {
+    console.error('Slack sendBlocksMessage error:', error.response?.data || error.message);
+    throw new Error(`Failed to send blocks message to Slack: ${error.message}`);
+  }
+}
+
+/**
  * Send an ephemeral message — visible ONLY to the target user, never
  * to others in the channel/thread. Backed by `chat.postEphemeral`.
  *

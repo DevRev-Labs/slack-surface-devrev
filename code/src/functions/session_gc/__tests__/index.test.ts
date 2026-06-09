@@ -1,10 +1,13 @@
 import { FunctionInput } from '../../../types';
 import * as sessionStore from '../../../utils/session-store';
 import { SessionRecord } from '../../../utils/session-store';
+import * as slackClient from '../../../utils/slack-client';
 import { run } from '../index';
 
 jest.mock('../../../utils/session-store');
+jest.mock('../../../utils/slack-client');
 const mockedSessionStore = sessionStore as jest.Mocked<typeof sessionStore>;
+const mockedSlackClient = slackClient as jest.Mocked<typeof slackClient>;
 
 function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {
@@ -22,6 +25,7 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     feedbackText: '',
     generation: 0,
     hardExpiresAt: 0,
+    feedbackPromptTs: '',
     lastDeliveredTurn: 0,
     lastUsedAt: 0,
     messageCount: 0,
@@ -58,7 +62,7 @@ const mockEvent: FunctionInput = {
   input_data: {
     event_sources: {},
     global_values: { ai_agent_id: '' },
-    keyrings: {},
+    keyrings: { slack_bot_token: 'xoxb-test' },
   },
   payload: { event_key: 'session-gc-tick' },
 };
@@ -68,8 +72,13 @@ describe('session_gc', () => {
     jest.clearAllMocks();
     mockedSessionStore.listIdleExpiredSessions.mockResolvedValue([]);
     mockedSessionStore.listHardExpiredSessions.mockResolvedValue([]);
-    mockedSessionStore.endSession.mockResolvedValue({} as any);
+    // endSession echoes the record back so the GC has access to its
+    // freshly-updated fields when deciding to post a feedback prompt.
+    mockedSessionStore.endSession.mockImplementation(async (_c, r) => ({ ...r, status: 'expired', endReason: 'idle_timeout' }));
     mockedSessionStore.deleteSession.mockResolvedValue(undefined);
+    mockedSessionStore.patchSession.mockImplementation(async (_c, r) => r);
+    mockedSlackClient.sendBlocksMessage.mockResolvedValue('prompt-ts-1');
+    mockedSlackClient.deleteMessage.mockResolvedValue();
   });
 
   test('idle pass marks idle-expired sessions', async () => {
@@ -124,6 +133,65 @@ describe('session_gc', () => {
   test('returns success with zero counts when there is nothing to do', async () => {
     const result = await run([mockEvent]);
     expect(result).toMatchObject({ idle_marked: 0, sessions_deleted: 0, status: 'success' });
+  });
+
+  test('on idle expiry: posts feedback prompt + persists its ts on the session', async () => {
+    const idle = makeRecord({
+      channel: 'C-idle',
+      sessionId: 'uuid-idle',
+      threadTs: 't-idle',
+      userId: 'U-idle',
+    });
+    mockedSessionStore.listIdleExpiredSessions.mockResolvedValue([idle]);
+
+    await run([mockEvent]);
+
+    expect(mockedSlackClient.sendBlocksMessage).toHaveBeenCalledWith(
+      'C-idle',
+      expect.any(String),
+      expect.any(Array),
+      'xoxb-test',
+      't-idle'
+    );
+    expect(mockedSessionStore.patchSession).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ sessionId: 'uuid-idle' }),
+      expect.objectContaining({ feedbackPromptTs: 'prompt-ts-1' })
+    );
+  });
+
+  test('idle expiry: skips prompt when feedback already submitted', async () => {
+    const idle = makeRecord({ channel: 'C', feedbackRating: 4, sessionId: 'uuid-rated' });
+    mockedSessionStore.listIdleExpiredSessions.mockResolvedValue([idle]);
+
+    await run([mockEvent]);
+
+    expect(mockedSlackClient.sendBlocksMessage).not.toHaveBeenCalled();
+  });
+
+  test('idle expiry: skips prompt when one already exists (idempotent on re-run)', async () => {
+    const idle = makeRecord({ channel: 'C', feedbackPromptTs: 'already-there', sessionId: 'uuid-pre' });
+    mockedSessionStore.listIdleExpiredSessions.mockResolvedValue([idle]);
+
+    await run([mockEvent]);
+
+    expect(mockedSlackClient.sendBlocksMessage).not.toHaveBeenCalled();
+  });
+
+  test('hard expiry: deletes the lingering feedback prompt before nuking the session', async () => {
+    const hard = makeRecord({
+      channel: 'C-hard',
+      feedbackPromptTs: 'prompt-old-ts',
+      objectId: 'co-hard',
+      sessionId: 'uuid-hard',
+      status: 'expired',
+    });
+    mockedSessionStore.listHardExpiredSessions.mockResolvedValue([hard]);
+
+    await run([mockEvent]);
+
+    expect(mockedSlackClient.deleteMessage).toHaveBeenCalledWith('C-hard', 'prompt-old-ts', 'xoxb-test');
+    expect(mockedSessionStore.deleteSession).toHaveBeenCalledWith(expect.anything(), hard);
   });
 
   test('returns error when devrev config is missing', async () => {

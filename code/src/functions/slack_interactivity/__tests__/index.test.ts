@@ -38,6 +38,7 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     feedbackText: '',
     generation: 0,
     hardExpiresAt: 0,
+    feedbackPromptTs: '',
     lastDeliveredTurn: 0,
     lastUsedAt: 0,
     messageCount: 0,
@@ -297,10 +298,33 @@ describe('slack_interactivity', () => {
     expect(mockedSlackClient.openView).not.toHaveBeenCalled();
   });
 
-  test('ignores view_closed and block_actions', async () => {
-    const r1 = await run([makeBaseEvent({ type: 'view_closed' })]);
-    const r2 = await run([makeBaseEvent({ type: 'block_actions' })]);
-    expect(r1.status).toBe('ignored');
-    expect(r2.status).toBe('ignored');
+  test('ignores view_closed', async () => {
+    const r = await run([makeBaseEvent({ type: 'view_closed' })]);
+    expect(r.status).toBe('ignored');
+  });
+
+  test('ignores block_actions with no actions', async () => {
+    const r = await run([makeBaseEvent({ actions: [], type: 'block_actions' })]);
+    expect(r.status).toBe('ignored');
+  });
+
+  test('block_actions: feedback prompt button click opens the modal pre-bound to ctx', async () => {
+    const ctxValue = encodeContext({ channel: 'C-ended', sessionId: 'sess-ended', userId: 'U1' });
+    const result = await run([
+      makeBaseEvent({
+        actions: [{ action_id: 'feedback_open_from_prompt', value: ctxValue }],
+        trigger_id: 'trig-click',
+        type: 'block_actions',
+      }),
+    ]);
+    expect(mockedSlackClient.openView).toHaveBeenCalledWith(
+      'trig-click',
+      expect.objectContaining({
+        callback_id: FEEDBACK_VIEW_CALLBACK,
+        submit: expect.anything(),
+      }),
+      'xoxb-test'
+    );
+    expect(result.session_id).toBe('sess-ended');
   });
 });

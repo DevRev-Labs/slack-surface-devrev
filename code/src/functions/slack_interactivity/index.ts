@@ -20,6 +20,7 @@
 /* eslint-disable simple-import-sort/imports */
 import { FunctionInput } from '../../types';
 import {
+  ACTION_OPEN_FEEDBACK_FROM_PROMPT,
   buildErrorModal,
   buildFeedbackConfirmationBlocks,
   buildFeedbackModal,
@@ -222,10 +223,57 @@ async function handle(event: FunctionInput): Promise<any> {
   if (type === 'view_submission') {
     return handleViewSubmission(interactivity, slackBotToken, storeConfig, requestId);
   }
-  if (type === 'view_closed' || type === 'block_actions') {
+  if (type === 'block_actions') {
+    return handleBlockActions(interactivity, slackBotToken, requestId);
+  }
+  if (type === 'view_closed') {
     return { reason: `No-op for type ${type}`, status: 'ignored' };
   }
   return { reason: `Unsupported interactivity type: ${type}`, status: 'ignored' };
+}
+
+/**
+ * Handle Block-Kit button clicks.
+ *
+ * Today the only registered button is the "Submit your feedback" prompt
+ * posted by session_gc on idle expiry. Click → use the click's
+ * trigger_id to open the modal pre-bound to the (ended) session id
+ * encoded in the button's `value`.
+ */
+async function handleBlockActions(
+  payload: SlackInteractivityPayload,
+  slackBotToken: string,
+  requestId: string
+): Promise<unknown> {
+  const action = payload.actions?.[0];
+  if (!action?.action_id) {
+    return { reason: 'No action in block_actions payload', status: 'ignored' };
+  }
+
+  if (action.action_id !== ACTION_OPEN_FEEDBACK_FROM_PROMPT) {
+    return { reason: `Unhandled action_id: ${action.action_id}`, status: 'ignored' };
+  }
+
+  const ctx = decodeContext(action.value);
+  if (!ctx) {
+    console.warn(`[${requestId}] [block_actions] invalid context on feedback button`);
+    return { reason: 'Invalid feedback prompt value', status: 'error' };
+  }
+  if (!payload.trigger_id) {
+    console.warn(`[${requestId}] [block_actions] missing trigger_id`);
+    return { reason: 'Missing trigger_id', status: 'error' };
+  }
+
+  try {
+    // Open the real form directly — sessionId is already in ctx, so no
+    // DevRev round-trip is needed during the 3s trigger_id window.
+    await openView(payload.trigger_id, buildFeedbackModal(ctx), slackBotToken);
+    console.log(`[${requestId}] [block_actions] feedback modal opened session=${ctx.sessionId}`);
+    return { mode: 'feedback_modal_opened', session_id: ctx.sessionId, status: 'success' };
+  } catch (error: unknown) {
+    console.error(`[${requestId}] [block_actions] views.open failed: ${errMsg(error)}`);
+    return { details: errMsg(error), reason: 'views.open failed', status: 'error' };
+  }
 }
 
 /**

@@ -285,7 +285,10 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
     }
   }
 
-  // Handle final message — delete temp message and send final response
+  // Handle final message — atomically replace the "Searching…" placeholder
+  // with the agent reply (chat.update). Re-read the session immediately
+  // before deciding so we don't race slack_handler's tempMessageTs write
+  // — that race was producing one orphaned placeholder + a separate reply.
   console.log(`[${requestId}] [AI_RESP] Extracting final response text from payload`);
   console.log(
     `[${requestId}] [AI_RESP] full payload: ${JSON.stringify(payload.ai_agent_response ?? null).substring(0, 500)}`
@@ -298,28 +301,34 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
   }
   console.log(`[${requestId}] [AI_RESP] Response text extracted, length: ${responseText.length}`);
 
+  // Re-read the latest session row to pick up tempMessageTs that was
+  // written by slack_handler after the original conversationRef snapshot
+  // was built.
+  if (sessionRecord) {
+    try {
+      const fresh = await getSessionById(storeConfig, sessionRecord.sessionId);
+      if (fresh) {
+        sessionRecord = fresh;
+        if (fresh.tempMessageTs && !conversationRef.tempMessageTs) {
+          conversationRef.tempMessageTs = fresh.tempMessageTs;
+          console.log(
+            `[${requestId}] [AI_RESP] picked up tempMessageTs=${fresh.tempMessageTs} from fresh session read`
+          );
+        }
+      }
+    } catch (refetchErr: any) {
+      console.warn(
+        `[${requestId}] [AI_RESP] re-fetch of session before final send failed: ${refetchErr?.message || refetchErr}`
+      );
+    }
+  }
+
   const threadTs = conversationRef.threadTs || conversationRef.messageTs;
   console.log(
     `[${requestId}] [AI_RESP] Sending final response, channel: ${conversationRef.channel}, threadTs: ${
       threadTs ?? 'none'
     }, tempMsgTs: ${conversationRef.tempMessageTs ?? 'none'}`
   );
-
-  if (conversationRef.tempMessageTs) {
-    try {
-      await deleteMessage(conversationRef.channel, conversationRef.tempMessageTs, slackBotToken);
-      conversationRef.tempMessageTs = undefined;
-      sessionRecord = await safePatch(
-        storeConfig,
-        sessionRecord,
-        { tempMessageTs: null },
-        requestId,
-        'final temp delete'
-      );
-    } catch (deleteErr: any) {
-      console.warn(`[${requestId}] [AI_RESP] Failed to delete temp message (continuing):`, deleteErr.message);
-    }
-  }
 
   try {
     const formattedResponse = formatAgentResponseForSlack(responseText);
@@ -328,7 +337,44 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
         responseText.length > 200 ? '...' : ''
       }"`
     );
-    await sendMessage(conversationRef.channel, formattedResponse, slackBotToken, threadTs);
+
+    if (conversationRef.tempMessageTs) {
+      // chat.update replaces the placeholder atomically — no chance of an
+      // orphaned "Searching…" message paired with a duplicate reply.
+      try {
+        await updateMessage(
+          conversationRef.channel,
+          conversationRef.tempMessageTs,
+          formattedResponse,
+          slackBotToken
+        );
+        console.log(
+          `[${requestId}] [AI_RESP] Final response replaced placeholder ts=${conversationRef.tempMessageTs}`
+        );
+      } catch (updateErr: any) {
+        // Placeholder is gone or stale — fall through to sendMessage so the
+        // user still sees the reply. Try a best-effort cleanup of the
+        // orphan first.
+        console.warn(
+          `[${requestId}] [AI_RESP] chat.update failed (${updateErr?.message || updateErr}); sending fresh message`
+        );
+        await deleteMessage(conversationRef.channel, conversationRef.tempMessageTs, slackBotToken).catch(
+          () => undefined
+        );
+        await sendMessage(conversationRef.channel, formattedResponse, slackBotToken, threadTs);
+      }
+      sessionRecord = await safePatch(
+        storeConfig,
+        sessionRecord,
+        { tempMessageTs: null },
+        requestId,
+        'final temp cleared'
+      );
+      conversationRef.tempMessageTs = undefined;
+    } else {
+      await sendMessage(conversationRef.channel, formattedResponse, slackBotToken, threadTs);
+    }
+
     console.log(
       `[${requestId}] [AI_RESP] Final response sent successfully to channel: ${conversationRef.channel}, thread: ${
         threadTs ?? 'none'

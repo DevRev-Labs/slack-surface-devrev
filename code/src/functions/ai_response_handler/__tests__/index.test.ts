@@ -29,6 +29,7 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     feedbackText: '',
     generation: 0,
     hardExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+    feedbackPromptTs: '',
     lastDeliveredTurn: 0,
     lastUsedAt: Date.now(),
     messageCount: 1,
@@ -242,18 +243,27 @@ describe('ai_response_handler', () => {
     expect(result.status).toBe('error');
   });
 
-  test('deletes temp message and patches session before sending final response', async () => {
+  test('replaces the Searching placeholder atomically via chat.update (no delete + new send)', async () => {
     mockedSessionStore.getSessionById.mockResolvedValue(makeRecord({ tempMessageTs: '1705315801.000200' }));
 
     await run([mockEvent]);
 
-    expect(mockedSlackClient.deleteMessage).toHaveBeenCalledWith('C0123456789', '1705315801.000200', 'xoxb-test-token');
+    // chat.update fired against the placeholder ts — no orphan, no duplicate.
+    expect(mockedSlackClient.updateMessage).toHaveBeenCalledWith(
+      'C0123456789',
+      '1705315801.000200',
+      'AI response content',
+      'xoxb-test-token'
+    );
+    // Session's tempMessageTs cleared after the swap.
     expect(mockedSessionStore.patchSession).toHaveBeenCalledWith(
       expect.anything(),
       expect.anything(),
       expect.objectContaining({ tempMessageTs: null })
     );
-    expect(mockedSlackClient.sendMessage).toHaveBeenCalledWith(
+    // Old delete-then-send path NOT used.
+    expect(mockedSlackClient.deleteMessage).not.toHaveBeenCalled();
+    expect(mockedSlackClient.sendMessage).not.toHaveBeenCalledWith(
       'C0123456789',
       'AI response content',
       'xoxb-test-token',

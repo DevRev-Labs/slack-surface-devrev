@@ -54,6 +54,11 @@ export const SESSION_FIELD = {
   // `progress` events emitted by the AI Agent for the same turn.
   lastDeliveredTurn: `${TNT}last_delivered_turn`,
 
+  // Slack ts of the "Submit your feedback" prompt posted by session_gc
+  // when the session idle-expires. Stored so the GC's later hard-expiry
+  // sweep can delete that prompt before the conversation goes away.
+  feedbackPromptTs: `${TNT}feedback_prompt_ts`,
+
   lastUsedAtMs: `${TNT}last_used_at_ms`,
 
   messageCount: `${TNT}message_count`,
@@ -134,6 +139,7 @@ export const SESSION_FIELD_SPECS: FieldSpec[] = [
   { field_type: 'text', name: stripTnt(SESSION_FIELD.feedbackText) },
   { field_type: 'timestamp', name: stripTnt(SESSION_FIELD.feedbackSubmittedAtMs) },
   { field_type: 'int', name: stripTnt(SESSION_FIELD.lastDeliveredTurn) },
+  { field_type: 'text', name: stripTnt(SESSION_FIELD.feedbackPromptTs) },
 ];
 
 export type SchemaFieldSpec = FieldSpec;

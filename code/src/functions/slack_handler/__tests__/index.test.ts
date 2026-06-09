@@ -57,6 +57,7 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     feedbackText: '',
     generation: 0,
     hardExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
+    feedbackPromptTs: '',
     lastDeliveredTurn: 0,
     lastUsedAt: Date.now(),
     messageCount: 0,

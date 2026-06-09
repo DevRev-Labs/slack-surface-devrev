@@ -115,6 +115,7 @@ function emptyRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     feedbackText: '',
     generation: 0,
     hardExpiresAt: 0,
+    feedbackPromptTs: '',
     lastDeliveredTurn: 0,
     lastUsedAt: 0,
     messageCount: 0,

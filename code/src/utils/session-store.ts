@@ -63,6 +63,7 @@ export interface SessionRecord {
   feedbackText: string;
   feedbackSubmittedAt: number;
   lastDeliveredTurn: number;
+  feedbackPromptTs: string;
 }
 
 export interface StoreConfig {
@@ -112,6 +113,7 @@ export interface SessionPatch {
   feedbackText?: string;
   feedbackSubmittedAt?: number;
   lastDeliveredTurn?: number;
+  feedbackPromptTs?: string | null;
 }
 
 // Maps `sessionId → DevRev conversation id`. Avoids the list-then-filter
@@ -256,6 +258,7 @@ function sessionCustomFields(record: SessionRecord): Record<string, any> {
     [SESSION_FIELD.feedbackText]: trimText(record.feedbackText),
     [SESSION_FIELD.feedbackSubmittedAtMs]: epochMsToIso(record.feedbackSubmittedAt),
     [SESSION_FIELD.lastDeliveredTurn]: record.lastDeliveredTurn || undefined,
+    [SESSION_FIELD.feedbackPromptTs]: trimText(record.feedbackPromptTs),
   });
 }
 
@@ -279,6 +282,7 @@ function recordFromConversation(conversation: any): SessionRecord | null {
     generation: asNumber(fields[SESSION_FIELD.generation]) ?? 0,
     hardExpiresAt: asEpochMs(fields[SESSION_FIELD.hardExpiresAtMs]) ?? 0,
     lastDeliveredTurn: asNumber(fields[SESSION_FIELD.lastDeliveredTurn]) ?? 0,
+    feedbackPromptTs: asString(fields[SESSION_FIELD.feedbackPromptTs]) || '',
     lastUsedAt: asEpochMs(fields[SESSION_FIELD.lastUsedAtMs]) ?? 0,
     messageCount: asNumber(fields[SESSION_FIELD.messageCount]) ?? 0,
     messageTs: asString(fields[SESSION_FIELD.messageTs]) || '',
@@ -305,6 +309,7 @@ function mergeRecord(objectId: string, partial: Partial<SessionRecord>): Session
     devrevUserId: partial.devrevUserId || '',
     endReason: (partial.endReason as SessionEndReason) || '',
     expiresAt: typeof partial.expiresAt === 'number' ? partial.expiresAt : Date.now(),
+    feedbackPromptTs: partial.feedbackPromptTs || '',
     feedbackRating: typeof partial.feedbackRating === 'number' ? partial.feedbackRating : 0,
     feedbackSubmittedAt: typeof partial.feedbackSubmittedAt === 'number' ? partial.feedbackSubmittedAt : 0,
     feedbackText: partial.feedbackText || '',
@@ -595,6 +600,8 @@ export async function touchSession(
     conversationType: patch.conversationType ?? record.conversationType,
     devrevUserId: patch.devrevUserId ?? record.devrevUserId,
     expiresAt: now + timing.idleTtlMs,
+    feedbackPromptTs:
+      patch.feedbackPromptTs === null ? '' : patch.feedbackPromptTs ?? record.feedbackPromptTs,
     feedbackRating: patch.feedbackRating ?? record.feedbackRating,
     feedbackSubmittedAt: patch.feedbackSubmittedAt ?? record.feedbackSubmittedAt,
     feedbackText: patch.feedbackText ?? record.feedbackText,
@@ -629,6 +636,8 @@ export async function patchSession(
     channelName: patch.channelName ?? record.channelName,
     conversationType: patch.conversationType ?? record.conversationType,
     devrevUserId: patch.devrevUserId ?? record.devrevUserId,
+    feedbackPromptTs:
+      patch.feedbackPromptTs === null ? '' : patch.feedbackPromptTs ?? record.feedbackPromptTs,
     feedbackRating: patch.feedbackRating ?? record.feedbackRating,
     feedbackSubmittedAt: patch.feedbackSubmittedAt ?? record.feedbackSubmittedAt,
     feedbackText: patch.feedbackText ?? record.feedbackText,
