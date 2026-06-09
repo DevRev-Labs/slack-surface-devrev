@@ -32,7 +32,7 @@ import {
   StoreConfig,
   touchSession,
 } from '../../utils/session-store';
-import { getChannelName, getUserProfile, removeBotMention, sendMessage } from '../../utils/slack-client';
+import { getChannelName, getUserProfile, removeBotMention, sendMessage, updateMessage } from '../../utils/slack-client';
 import { validateSlackSignature } from '../../utils/slack-signature-validator';
 import { postTimelineComment } from '../../utils/timeline';
 
@@ -417,15 +417,29 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
   } catch (error: any) {
     console.error(`[${requestId}] [AI] Async API error: ${error.message}`);
 
+    // Replace the "⏳ Searching..." placeholder in place with the
+    // error text so we don't leave an orphaned placeholder + a
+    // separate error message in the channel. If we never posted a
+    // placeholder, fall back to a fresh message.
     if (config.slackBotToken) {
-      await sendMessage(
-        conversationRef.channel,
-        'Sorry, I encountered an error processing your request. Please try again.',
-        config.slackBotToken,
-        threadTs
-      ).catch(() => {
-        /* swallow */
-      });
+      const errorText = 'Sorry, I encountered an error processing your request. Please try again.';
+      const placeholderTs = conversationRef.tempMessageTs;
+      if (placeholderTs) {
+        try {
+          await updateMessage(conversationRef.channel, placeholderTs, errorText, config.slackBotToken);
+        } catch (updateErr: any) {
+          console.warn(
+            `[${requestId}] [AI] failed to overwrite placeholder with error (${updateErr?.message || updateErr}); sending fresh message`
+          );
+          await sendMessage(conversationRef.channel, errorText, config.slackBotToken, threadTs).catch(() => {
+            /* swallow */
+          });
+        }
+      } else {
+        await sendMessage(conversationRef.channel, errorText, config.slackBotToken, threadTs).catch(() => {
+          /* swallow */
+        });
+      }
     }
 
     return {
