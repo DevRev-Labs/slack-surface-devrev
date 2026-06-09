@@ -91,6 +91,7 @@ describe('slack_interactivity', () => {
     mockedSlackClient.openView.mockResolvedValue('view-id-1');
     mockedSlackClient.updateView.mockResolvedValue();
     mockedSlackClient.postEphemeral.mockResolvedValue();
+    mockedSlackClient.deleteMessage.mockResolvedValue();
     mockedSessionStore.getLatestActiveSessionForUserInChannel.mockResolvedValue(makeRecord());
     mockedSessionStore.getSessionById.mockResolvedValue(makeRecord());
     mockedSessionStore.patchSession.mockImplementation(async (_c, r) => r);
@@ -212,6 +213,38 @@ describe('slack_interactivity', () => {
       // 4. Modal swapped to a thank-you view (private to submitter).
       expect(result.response_action).toBe('update');
       expect(result.view?.title?.text).toMatch(/feedback/i);
+    });
+
+    test('on submit: deletes the lingering feedback prompt and clears its ts', async () => {
+      mockedSessionStore.getSessionById.mockResolvedValue(
+        makeRecord({ feedbackPromptTs: 'prompt-ts-99', sessionId: 'sess-1' })
+      );
+      const ctx = encodeContext({ channel: 'C1', sessionId: 'sess-1' });
+      await run([
+        makeBaseEvent({
+          type: 'view_submission',
+          user: { id: 'Usubmitter' },
+          view: {
+            callback_id: FEEDBACK_VIEW_CALLBACK,
+            private_metadata: ctx,
+            state: {
+              values: {
+                [FEEDBACK_BLOCK_RATING]: {
+                  [FEEDBACK_ACTION_RATING]: { selected_option: { value: '5' } },
+                },
+              },
+            },
+          },
+        }),
+      ]);
+      // Persist clears the prompt-ts field.
+      expect(mockedSessionStore.patchSession).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({ feedbackPromptTs: null, feedbackRating: 5 })
+      );
+      // Slack message deleted.
+      expect(mockedSlackClient.deleteMessage).toHaveBeenCalledWith('C1', 'prompt-ts-99', 'xoxb-test');
     });
 
     test('surfaces validation error when no rating selected', async () => {

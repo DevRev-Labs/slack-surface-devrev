@@ -44,7 +44,7 @@ import {
   SessionRecord,
   StoreConfig,
 } from '../../utils/session-store';
-import { openView, postEphemeral, updateView } from '../../utils/slack-client';
+import { deleteMessage, openView, postEphemeral, updateView } from '../../utils/slack-client';
 import { validateSlackSignature } from '../../utils/slack-signature-validator';
 /* eslint-enable simple-import-sort/imports */
 
@@ -114,18 +114,26 @@ async function handle(event: FunctionInput): Promise<any> {
   const requestId = event.execution_metadata.request_id;
   const payload = event.payload;
 
+  const wrapped = payload && typeof payload === 'object' && 'body' in payload && 'headers' in payload ? payload : null;
+  let body: any = wrapped ? wrapped.body : payload;
+  const headers: Record<string, any> | undefined = wrapped ? wrapped.headers : undefined;
+  const bodyRaw: string | undefined =
+    wrapped && typeof (wrapped as any).body_raw === 'string' ? (wrapped as any).body_raw : undefined;
+
+  // Fast path for block_actions clicks. Slack's `trigger_id` is valid
+  // for ~3 seconds from click time — every millisecond we spend here
+  // counts against that budget. Get to views.open as fast as possible
+  // by skipping the per-invocation logging until after we've consumed
+  // the trigger.
+  const fastPathResult = await tryFastPathBlockActions(bodyRaw, body, event.input_data.keyrings, requestId);
+  if (fastPathResult) return fastPathResult;
+
   // Visibility — log every invocation so we can confirm Slack reaches us.
   console.log(
     `[${requestId}] [interactivity] received payload keys: ${
       payload && typeof payload === 'object' ? Object.keys(payload).join(',') : typeof payload
     }`
   );
-
-  const wrapped = payload && typeof payload === 'object' && 'body' in payload && 'headers' in payload ? payload : null;
-  let body: any = wrapped ? wrapped.body : payload;
-  const headers: Record<string, any> | undefined = wrapped ? wrapped.headers : undefined;
-  const bodyRaw: string | undefined =
-    wrapped && typeof (wrapped as any).body_raw === 'string' ? (wrapped as any).body_raw : undefined;
 
   // Diagnostic: show what the inner body looks like before normalization.
   // Slack form-encoded bodies sometimes arrive as parsed objects with the
@@ -434,8 +442,14 @@ async function handleViewSubmission(
   }
 
   const submittedAt = Date.now();
+  // If the user submitted from the GC-posted "Submit your feedback"
+  // prompt, that prompt message is now redundant — clear its ts on the
+  // session and delete the message from Slack. Done before persistence
+  // so the patchSession write covers the cleared field too.
+  const promptTsToDelete = sessionRecord.feedbackPromptTs || '';
   try {
     await patchSession(storeConfig, sessionRecord, {
+      feedbackPromptTs: null,
       feedbackRating: rating,
       feedbackSubmittedAt: submittedAt,
       feedbackText: comment,
@@ -448,6 +462,18 @@ async function handleViewSubmission(
     return responseActionErrors({
       [FEEDBACK_BLOCK_RATING]: 'We could not save your feedback right now. Please try again.',
     });
+  }
+
+  // Best-effort delete of the prompt message that asked the user to
+  // submit feedback. Doesn't block the response; if it fails, the
+  // hard-expiry GC sweep will clean it up later anyway.
+  if (promptTsToDelete && sessionRecord.channel) {
+    try {
+      await deleteMessage(sessionRecord.channel, promptTsToDelete, slackBotToken);
+      console.log(`[${requestId}] [feedback] deleted prompt ts=${promptTsToDelete}`);
+    } catch (err: unknown) {
+      console.warn(`[${requestId}] [feedback] prompt delete failed: ${errMsg(err)}`);
+    }
   }
 
   // Send a PRIVATE confirmation back. Two layers, both visible only to
@@ -500,6 +526,84 @@ function parseRating(input: any): number | null {
  */
 function responseActionErrors(errors: Record<string, string>): any {
   return { errors, response_action: 'errors' };
+}
+
+/**
+ * Fast path for Block-Kit button clicks (block_actions).
+ *
+ * Slack's `trigger_id` is valid for only ~3 seconds from the moment the
+ * user clicked. Going through the full handle() path (signature
+ * verification, multiple body normalisation passes, storeConfig setup)
+ * has been observed to consume enough of that budget that views.open
+ * fails with `expired_trigger_id`.
+ *
+ * This function does the minimum work needed to call views.open:
+ *   - Decode body_raw if needed to obtain the `payload=…` form field.
+ *   - JSON.parse the payload.
+ *   - For `block_actions` with our feedback-prompt action, extract
+ *     trigger_id + the encoded FeedbackContext on the click's value.
+ *   - Call views.open and return.
+ *
+ * If the payload isn't a block_actions click, or isn't our action_id,
+ * we return null so the caller continues with the normal flow.
+ *
+ * Note: we deliberately skip signature verification on the fast path.
+ * The downside of an attacker hitting this path is that they can ask
+ * Slack to open a modal with a fake trigger_id — which Slack itself
+ * rejects with not_authed/invalid_trigger_id. There's no escalation
+ * path because the modal can't write to anything until the user
+ * actually submits, and that submission goes through the normal
+ * (signature-verified) view_submission path.
+ */
+async function tryFastPathBlockActions(
+  bodyRaw: string | undefined,
+  bodyAlreadyParsed: unknown,
+  keyrings: Record<string, string> | undefined,
+  requestId: string
+): Promise<unknown | null> {
+  // Get to a parsed JSON click payload as quickly as possible.
+  let click: { type?: string; trigger_id?: string; actions?: Array<{ action_id?: string; value?: string }> } | null =
+    null;
+  try {
+    if (bodyAlreadyParsed && typeof bodyAlreadyParsed === 'object' && (bodyAlreadyParsed as { type?: string }).type) {
+      // Gateway already gave us a parsed JSON object.
+      click = bodyAlreadyParsed as unknown as typeof click;
+    } else if (bodyRaw) {
+      const decoded = Buffer.from(bodyRaw, 'base64').toString('utf8');
+      // Slack interactivity bodies are `payload=<urlencoded JSON>`.
+      const eq = decoded.indexOf('=');
+      const payloadStr = decoded.startsWith('payload=')
+        ? decodeURIComponent(decoded.slice(eq + 1).replace(/\+/g, ' '))
+        : null;
+      if (payloadStr) click = JSON.parse(payloadStr);
+    }
+  } catch {
+    return null;
+  }
+
+  if (!click || click.type !== 'block_actions' || !click.trigger_id) return null;
+  const action = click.actions?.[0];
+  if (!action || action.action_id !== ACTION_OPEN_FEEDBACK_FROM_PROMPT) return null;
+
+  const ctx = decodeContext(action.value);
+  if (!ctx) {
+    console.warn(`[${requestId}] [block_actions] fast-path: invalid context`);
+    return null;
+  }
+  const slackBotToken = keyrings?.['slack_bot_token'];
+  if (!slackBotToken) {
+    console.warn(`[${requestId}] [block_actions] fast-path: slack_bot_token missing`);
+    return null;
+  }
+
+  try {
+    await openView(click.trigger_id, buildFeedbackModal(ctx), slackBotToken);
+    console.log(`[${requestId}] [block_actions] fast-path: feedback modal opened session=${ctx.sessionId}`);
+    return { mode: 'feedback_modal_opened', session_id: ctx.sessionId, status: 'success' };
+  } catch (error: unknown) {
+    console.error(`[${requestId}] [block_actions] fast-path views.open failed: ${errMsg(error)}`);
+    return { details: errMsg(error), reason: 'views.open failed', status: 'error' };
+  }
 }
 
 /**

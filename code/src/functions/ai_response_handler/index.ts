@@ -213,6 +213,28 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
     if (progress) {
       const progressMessage = getProgressMessage(progress);
 
+      // Re-fetch the latest session row so a tempMessageTs that
+      // slack_handler wrote *after* this handler's snapshot is
+      // visible — without this, an early progress event posts a
+      // duplicate "Searching…" before the original placeholder write
+      // becomes readable.
+      if (sessionRecord && !conversationRef.tempMessageTs) {
+        try {
+          const fresh = await getSessionById(storeConfig, sessionRecord.sessionId);
+          if (fresh?.tempMessageTs) {
+            conversationRef.tempMessageTs = fresh.tempMessageTs;
+            sessionRecord = fresh;
+            console.log(
+              `[${requestId}] [AI_RESP] progress: picked up tempMessageTs=${fresh.tempMessageTs} from fresh session read`
+            );
+          }
+        } catch (refetchErr: any) {
+          console.warn(
+            `[${requestId}] [AI_RESP] progress re-fetch failed: ${refetchErr?.message || refetchErr}`
+          );
+        }
+      }
+
       try {
         if (conversationRef.tempMessageTs) {
           try {
