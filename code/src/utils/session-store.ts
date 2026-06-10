@@ -23,8 +23,18 @@
 import axios from 'axios';
 import { createHash, randomUUID } from 'crypto';
 
+import {
+  DEFAULT_SESSION_ABSOLUTE_TTL_HOURS,
+  DEFAULT_SESSION_IDLE_TTL_MINUTES,
+  DEVREV_CONVERSATION_TYPE,
+  DEVREV_SOURCE_CHANNEL_SLACK,
+  DEVREV_TEXT_FIELD_MAX_LENGTH,
+  LOG_TAG,
+  TENANT_FRAGMENT_SCHEMA_SPEC,
+} from '../config';
 import { ConversationReference } from './conversation-store';
 import { getOrCreateActAsToken } from './devrev-auth';
+import { createLogger } from './logger';
 import { SessionTimingConfig } from './session-config';
 import { omitImmutable, SESSION_FIELD, SESSION_IMMUTABLE_FIELDS } from './session-fields';
 
@@ -114,37 +124,20 @@ export interface SessionPatch {
   lastDeliveredTurn?: number;
 }
 
+// Module-level logger — requestId is not known here; callers pass it when needed.
+const log = createLogger(undefined, LOG_TAG.STORE);
+
 // Maps `sessionId → DevRev conversation id`. Avoids the list-then-filter
 // roundtrip that conversations.list requires.
 const sessionObjectIdCache = new Map<string, string>();
 // Maps conversationKey → sessionId for the currently active session.
 const activeSessionByConversation = new Map<string, string>();
 
-// Schema spec required by the conversation tenant-fragment endpoints.
-// `validate_required_fields: true` matches the SDK guidance — DevRev returns
-// a clean 400 with the missing field name instead of a generic error.
-const TENANT_FRAGMENT_SCHEMA_SPEC = {
-  tenant_fragment: true,
-  validate_required_fields: true,
-} as const;
-
-// `conversations.create` requires a `type` and "support" is the only value
-// the API accepts today.
-const CONVERSATION_TYPE_SUPPORT = 'support';
-
-// Marks the conversation as originating from Slack so the DevRev UI
-// renders "Source: Slack" with the Slack icon/label instead of the
-// default "chat". DevRev's platform recognises the token "slack".
-const SOURCE_CHANNEL_SLACK = 'slack';
-
+// Default timing used when the caller does not pass an explicit SessionTimingConfig.
 const DEFAULT_TIMING: SessionTimingConfig = {
-  absoluteTtlMs: 24 * 60 * 60 * 1000,
-  idleTtlMs: 8 * 60 * 60 * 1000,
+  absoluteTtlMs: DEFAULT_SESSION_ABSOLUTE_TTL_HOURS * 60 * 60 * 1000,
+  idleTtlMs: DEFAULT_SESSION_IDLE_TTL_MINUTES * 60 * 1000,
 };
-
-// DevRev text fields cap at 255 chars — Slack IDs are short, but DevRev DONs
-// can run long. Trim defensively.
-const TEXT_FIELD_MAX = 255;
 
 function isStoreConfigured(config: StoreConfig | undefined | null): boolean {
   return Boolean(config?.serviceAccountToken && config?.devrevEndpoint);
@@ -195,7 +188,7 @@ function asNumber(raw: any): number | undefined {
 
 const trimText = (value: string | undefined | null): string => {
   if (!value) return '';
-  return value.length > TEXT_FIELD_MAX ? value.slice(0, TEXT_FIELD_MAX) : value;
+  return value.length > DEVREV_TEXT_FIELD_MAX_LENGTH ? value.slice(0, DEVREV_TEXT_FIELD_MAX_LENGTH) : value;
 };
 
 // DevRev's tenant-fragment validator rejects empty strings on optional text
@@ -224,7 +217,7 @@ function buildSessionTitle(record: SessionRecord): string {
   const channel = describeChannel(record);
   const when = epochMsToIso(record.createdAt) || new Date().toISOString();
   const title = `${who} — ${channel} — ${when}`.trim();
-  return (title || `slack session ${record.sessionId}`).slice(0, TEXT_FIELD_MAX);
+  return (title || `slack session ${record.sessionId}`).slice(0, DEVREV_TEXT_FIELD_MAX_LENGTH);
 }
 
 function sessionCustomFields(record: SessionRecord): Record<string, any> {
@@ -333,7 +326,7 @@ async function listConversations(config: StoreConfig, limit: number): Promise<an
     const response = await axios.post(`${config.devrevEndpoint}/conversations.list`, body, authHeaders(config));
     return response.data?.conversations || [];
   } catch (error: any) {
-    console.warn('[session-store] conversations.list failed', {
+    log.warn('conversations.list failed', {
       err_data: error?.response?.data,
       err_status: error?.response?.status,
     });
@@ -403,9 +396,9 @@ async function writeSession(config: StoreConfig, record: SessionRecord, isCreate
       // We intentionally don't set `source_channel_v2`: it expects a
       // DevRev-internal Slack channel resource id (don:…/channels/…),
       // not the raw Slack channel id, and we don't have one.
-      source_channel: SOURCE_CHANNEL_SLACK,
+      source_channel: DEVREV_SOURCE_CHANNEL_SLACK,
       title,
-      type: CONVERSATION_TYPE_SUPPORT,
+      type: DEVREV_CONVERSATION_TYPE,
     };
     if (record.devrevUserId) {
       payload['members'] = [record.devrevUserId];
@@ -420,7 +413,7 @@ async function writeSession(config: StoreConfig, record: SessionRecord, isCreate
       }
       return record;
     } catch (error: any) {
-      console.error('[session-store] conversations.create failed', {
+      log.error('conversations.create failed', {
         err_data: error?.response?.data,
         err_status: error?.response?.status,
         session_id: record.sessionId,
@@ -438,7 +431,7 @@ async function writeSession(config: StoreConfig, record: SessionRecord, isCreate
     await axios.post(`${config.devrevEndpoint}/conversations.update`, updatePayload, authHeaders(config));
     return record;
   } catch (error: any) {
-    console.error('[session-store] conversations.update failed', {
+    log.error('conversations.update failed', {
       err_data: error?.response?.data,
       err_status: error?.response?.status,
       session_id: record.sessionId,
@@ -723,7 +716,7 @@ export async function deleteSession(config: StoreConfig, record: SessionRecord):
       { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } }
     );
   } catch (error: any) {
-    console.warn('[session-store] failed to delete session', {
+    log.warn('failed to delete session', {
       err_data: error?.response?.data,
       err_status: error?.response?.status,
       object_id: record.objectId,

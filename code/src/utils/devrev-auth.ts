@@ -7,6 +7,17 @@
 import { client, publicSDK } from '@devrev/typescript-sdk';
 import axios from 'axios';
 
+import {
+  ACT_AS_TOKEN_EXPIRES_IN_SECONDS,
+  LOG_TAG,
+  WEBHOOK_ACTIVE_POLL_INTERVAL_MS,
+  WEBHOOK_ACTIVE_WAIT_MAX_MS,
+} from '../config';
+import { createLogger } from './logger';
+
+// Module-level logger for all auth and webhook operations.
+const log = createLogger(undefined, LOG_TAG.AUTH);
+
 /**
  * Token Cache interface for act-as tokens.
  */
@@ -45,7 +56,7 @@ export function _clearWebhookCache(): void {
 export function invalidateWebhookCache(eventSourceId: string): void {
   const removed = webhookCache.delete(eventSourceId);
   if (removed) {
-    console.error(`[DevRev] Invalidated cached webhook for event source ${eventSourceId}`);
+    log.info('Invalidated cached webhook', { event_source_id: eventSourceId });
   }
 }
 
@@ -64,10 +75,11 @@ export async function findUserByEmail(email: string, endpoint: string, token: st
     const user = response.data.dev_users?.[0];
     return user ? user.id : null;
   } catch (error: any) {
-    console.error(
-      `[DevRev Auth] Error looking up user by email ${email}:`,
-      JSON.stringify(error.response?.data || error.message, null, 2)
-    );
+    log.error('Error looking up user by email', {
+      email,
+      err_data: error.response?.data,
+      err_message: error.message,
+    });
     return null;
   }
 }
@@ -81,22 +93,25 @@ export async function findUserByEmail(email: string, endpoint: string, token: st
  * @returns The new access token.
  */
 export async function createActAsToken(userId: string, endpoint: string, serviceToken: string): Promise<string | null> {
-  console.log(`[DevRev Auth] Creating act-as token for userId: ${userId}`);
+  log.info('Creating act-as token', { user_id: userId });
   try {
     const sdk = client.setup({ endpoint, token: serviceToken });
     const response = await sdk.authTokensCreate({
       act_as: userId,
-      expires_in: 360,
+      // TTL sourced from config so it can be tuned per deployment via env var.
+      expires_in: ACT_AS_TOKEN_EXPIRES_IN_SECONDS,
       grant_type: publicSDK.AuthTokenGrantType.UrnDevrevParamsOauthGrantTypeTokenIssue,
       requested_token_type: publicSDK.AuthTokenRequestedTokenType.UrnDevrevParamsOauthTokenTypePatActAs,
     });
-    console.log(`[DevRev Auth] act-as token created successfully`);
+    log.info('act-as token created successfully', { user_id: userId });
     return response.data.access_token;
   } catch (error: any) {
-    console.error('[DevRev Auth] act-as token creation failed:');
-    console.error('  status:', error.response?.status);
-    console.error('  data:', JSON.stringify(error.response?.data, null, 2));
-    console.error('  message:', error.message);
+    log.error('act-as token creation failed', {
+      err_data: error.response?.data,
+      err_message: error.message,
+      err_status: error.response?.status,
+      user_id: userId,
+    });
     return null;
   }
 }
@@ -167,7 +182,11 @@ export async function getWebhookStatus(webhookId: string, endpoint: string, toke
     });
     return response.data.webhook?.status || null;
   } catch (error: any) {
-    console.error('[DevRev] Error getting webhook status:', error.response?.data || error.message);
+    log.error('Error getting webhook status', {
+      err_data: error.response?.data,
+      err_message: error.message,
+      webhook_id: webhookId,
+    });
     return null;
   }
 }
@@ -186,8 +205,9 @@ export async function waitForWebhookActive(
   webhookId: string,
   endpoint: string,
   token: string,
-  maxWaitMs = 10000,
-  pollIntervalMs = 500
+  // Default values sourced from config so they can be tuned via env vars.
+  maxWaitMs = WEBHOOK_ACTIVE_WAIT_MAX_MS,
+  pollIntervalMs = WEBHOOK_ACTIVE_POLL_INTERVAL_MS
 ): Promise<boolean> {
   const startTime = Date.now();
 
@@ -195,19 +215,19 @@ export async function waitForWebhookActive(
     const status = await getWebhookStatus(webhookId, endpoint, token);
 
     if (status === 'active') {
-      console.log(`[DevRev] Webhook ${webhookId} is now active`);
+      log.info('Webhook is now active', { webhook_id: webhookId });
       return true;
     }
 
     if (status === 'error' || status === 'disabled') {
-      console.error(`[DevRev] Webhook ${webhookId} has status: ${status}`);
+      log.error('Webhook has unexpected status', { status, webhook_id: webhookId });
       return false;
     }
 
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
   }
 
-  console.warn(`[DevRev] Timeout waiting for webhook ${webhookId} to become active`);
+  log.warn('Timeout waiting for webhook to become active', { webhook_id: webhookId });
   return false;
 }
 
@@ -240,7 +260,7 @@ export async function createWebhook(url: string, endpoint: string, token: string
     const status = webhook?.status;
 
     if (!webhookId) {
-      console.error('[DevRev] No webhook ID in response');
+      log.error('No webhook ID in response from webhooks.create');
       return null;
     }
 
@@ -251,13 +271,16 @@ export async function createWebhook(url: string, endpoint: string, token: string
     const isActive = await waitForWebhookActive(webhookId, endpoint, token);
 
     if (!isActive) {
-      console.error(`[DevRev] Webhook ${webhookId} did not become active in time`);
+      log.error('Webhook did not become active in time', { webhook_id: webhookId });
       return null;
     }
 
     return webhookId;
   } catch (error: any) {
-    console.error('[DevRev] Error creating webhook:', JSON.stringify(error.response?.data, null, 2) || error.message);
+    log.error('Error creating webhook', {
+      err_data: error.response?.data,
+      err_message: error.message,
+    });
     return null;
   }
 }

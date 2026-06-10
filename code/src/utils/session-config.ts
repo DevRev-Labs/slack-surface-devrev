@@ -6,6 +6,8 @@
  * so callers can do simple `Date.now() + ttl` math.
  */
 
+import { DEFAULT_SESSION_ABSOLUTE_TTL_HOURS, DEFAULT_SESSION_IDLE_TTL_MINUTES } from '../config';
+
 // Built-in DevRev leaf type that backs the session record. Sessions live as
 // `conversation` objects with the Slack session fields attached as custom
 // fields, rather than as a bespoke custom-leaf-type.
@@ -19,8 +21,9 @@ export interface SessionTimingConfig {
   absoluteTtlMs: number;
 }
 
-const DEFAULT_IDLE_TTL_MIN = 8 * 60;
-const DEFAULT_ABSOLUTE_TTL_HOURS = 24;
+// Aliases from the central config so all defaults live in one place.
+const DEFAULT_IDLE_TTL_MIN = DEFAULT_SESSION_IDLE_TTL_MINUTES;
+const DEFAULT_ABSOLUTE_TTL_HOURS = DEFAULT_SESSION_ABSOLUTE_TTL_HOURS;
 
 function readNumber(value: unknown, fallback: number): number {
   if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;

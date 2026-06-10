@@ -18,7 +18,9 @@
  */
 
 /* eslint-disable simple-import-sort/imports */
+import { LOG_TAG } from '../../config';
 import { FunctionInput } from '../../types';
+import { createLogger } from '../../utils/logger';
 import {
   buildErrorModal,
   buildFeedbackConfirmationBlocks,
@@ -99,7 +101,10 @@ export const run = async (events: FunctionInput[]): Promise<any> => {
       try {
         return await handle(event);
       } catch (error: unknown) {
-        console.error(`[${event?.execution_metadata?.request_id ?? 'unknown'}] [interactivity] error:`, errMsg(error));
+        createLogger(event?.execution_metadata?.request_id ?? 'unknown', LOG_TAG.INTERACTIVITY).error(
+          'Unhandled interactivity error',
+          { err_message: errMsg(error) }
+        );
         return { reason: errMsg(error) || 'Unknown error', status: 'error' };
       }
     })
@@ -112,13 +117,13 @@ export default run;
 async function handle(event: FunctionInput): Promise<any> {
   const requestId = event.execution_metadata.request_id;
   const payload = event.payload;
+  // Per-request logger scoped to the interactivity subsystem.
+  const log = createLogger(requestId, LOG_TAG.INTERACTIVITY);
 
   // Visibility — log every invocation so we can confirm Slack reaches us.
-  console.log(
-    `[${requestId}] [interactivity] received payload keys: ${
-      payload && typeof payload === 'object' ? Object.keys(payload).join(',') : typeof payload
-    }`
-  );
+  log.info('received payload', {
+    keys: payload && typeof payload === 'object' ? Object.keys(payload).join(',') : typeof payload,
+  });
 
   const wrapped = payload && typeof payload === 'object' && 'body' in payload && 'headers' in payload ? payload : null;
   let body: any = wrapped ? wrapped.body : payload;
@@ -130,15 +135,15 @@ async function handle(event: FunctionInput): Promise<any> {
   // Slack form-encoded bodies sometimes arrive as parsed objects with the
   // form fields as keys (e.g. {command, trigger_id, user_id, …}); other
   // times as a string; other times empty with bytes only in body_raw.
-  console.log(
-    `[${requestId}] [interactivity] body type=${typeof body} keys=${
-      body && typeof body === 'object' ? Object.keys(body).slice(0, 20).join(',') : '∅'
-    } body_raw_len=${bodyRaw ? bodyRaw.length : 0}`
-  );
+  log.debug('body shape before normalization', {
+    body_keys: body && typeof body === 'object' ? Object.keys(body).slice(0, 20).join(',') : '∅',
+    body_raw_len: bodyRaw ? bodyRaw.length : 0,
+    body_type: typeof body,
+  });
   if (bodyRaw) {
     try {
       const decodedPreview = Buffer.from(bodyRaw, 'base64').toString('utf8').slice(0, 200);
-      console.log(`[${requestId}] [interactivity] body_raw preview: ${decodedPreview}`);
+      log.debug('body_raw preview', { preview: decodedPreview });
     } catch {}
   }
 
@@ -152,7 +157,7 @@ async function handle(event: FunctionInput): Promise<any> {
     (typeof b.type === 'string' || typeof b.command === 'string' || typeof b.payload === 'string');
 
   if (typeof body === 'string') {
-    console.log(`[${requestId}] [interactivity] body is string (len=${body.length}) — parsing as form`);
+    log.debug('body is string — parsing as form', { length: body.length });
     body = parseFormUrlEncoded(body);
   }
 
@@ -162,15 +167,13 @@ async function handle(event: FunctionInput): Promise<any> {
   if (!bodyHasUsefulKey(body) && bodyRaw) {
     try {
       const decoded = Buffer.from(bodyRaw, 'base64').toString('utf8');
-      console.log(
-        `[${requestId}] [interactivity] body has no command/type/payload — parsing body_raw (decoded_len=${decoded.length})`
-      );
+      log.debug('body has no command/type/payload — parsing body_raw', { decoded_len: decoded.length });
       const parsed = parseFormUrlEncoded(decoded);
       if (Object.keys(parsed).length > 0) {
         body = parsed;
       }
     } catch (err: unknown) {
-      console.warn(`[${requestId}] [interactivity] body_raw decode failed: ${errMsg(err)}`);
+      log.warn('body_raw decode failed', { err_message: errMsg(err) });
     }
   }
 
@@ -180,25 +183,25 @@ async function handle(event: FunctionInput): Promise<any> {
     try {
       body = JSON.parse(body.payload);
     } catch (err: unknown) {
-      console.warn(`[${requestId}] [interactivity] payload JSON parse failed: ${errMsg(err)}`);
+      log.warn('payload JSON parse failed', { err_message: errMsg(err) });
     }
   }
 
   const signingSecret = event.input_data.keyrings?.['slack_signing_secret'];
   const sigCheck = validateSlackSignature(signingSecret, headers, body, bodyRaw);
   if (!sigCheck.valid) {
-    console.warn(`[${requestId}] [interactivity] signature rejected: ${sigCheck.reason}`);
+    log.warn('signature rejected', { reason: sigCheck.reason }, LOG_TAG.AUTH);
     return FORBIDDEN_RESPONSE;
   }
 
   if (!body || typeof body !== 'object') {
-    console.warn(`[${requestId}] [interactivity] empty/invalid body after normalization`);
+    log.warn('empty/invalid body after normalization');
     return { reason: 'Empty interactivity payload', status: 'ignored' };
   }
 
   const slackBotToken = event.input_data.keyrings['slack_bot_token'];
   if (!slackBotToken) {
-    console.error(`[${requestId}] [interactivity] slack_bot_token missing`);
+    log.error('slack_bot_token missing');
     return { reason: 'Slack Bot Token not configured', status: 'error' };
   }
 
@@ -211,13 +214,13 @@ async function handle(event: FunctionInput): Promise<any> {
   // Slash command bodies have a `command` field; interactivity payloads
   // have a `type` field. Use the discriminator to dispatch.
   if (typeof (body as any).command === 'string') {
-    console.log(`[${requestId}] [interactivity] dispatch: slash command=${(body as any).command}`);
+    log.info('dispatch: slash command', { command: (body as any).command });
     return handleSlashCommand(body as SlackSlashCommandPayload, slackBotToken, storeConfig, requestId);
   }
 
   const interactivity = body as SlackInteractivityPayload;
   const type = interactivity.type;
-  console.log(`[${requestId}] [interactivity] type=${type}`);
+  log.info('dispatch: interactivity type', { type });
 
   if (type === 'view_submission') {
     return handleViewSubmission(interactivity, slackBotToken, storeConfig, requestId);
@@ -252,14 +255,15 @@ async function handleSlashCommand(
   storeConfig: StoreConfig,
   requestId: string
 ): Promise<any> {
+  const log = createLogger(requestId, LOG_TAG.SLASH);
   const command = (cmd.command || '').trim().toLowerCase();
   if (command !== FEEDBACK_SLASH_COMMAND) {
-    console.log(`[${requestId}] [slash] ignored unknown command: ${command}`);
+    log.info('ignored unknown command', { command });
     return { reason: `Unknown slash command: ${command}`, status: 'ignored' };
   }
 
   if (!cmd.trigger_id) {
-    console.warn(`[${requestId}] [slash] /sda-feedback missing trigger_id`);
+    log.warn('/sda-feedback missing trigger_id');
     return { reason: 'Missing trigger_id', status: 'error' };
   }
 
@@ -268,16 +272,14 @@ async function handleSlashCommand(
   let viewId: string;
   try {
     viewId = await openView(cmd.trigger_id, buildLoadingModal(), slackBotToken);
-    console.log(
-      `[${requestId}] [slash] /sda-feedback loading modal opened view_id=${viewId} channel=${cmd.channel_id} user=${cmd.user_id}`
-    );
+    log.info('/sda-feedback loading modal opened', { channel: cmd.channel_id, user: cmd.user_id, view_id: viewId });
   } catch (error: unknown) {
-    console.error(`[${requestId}] [slash] views.open (loading) failed: ${errMsg(error)}`);
+    log.error('views.open (loading) failed', { err_message: errMsg(error) });
     return { details: errMsg(error), reason: 'views.open failed', status: 'error' };
   }
 
   if (!viewId) {
-    console.warn(`[${requestId}] [slash] views.open returned no view id`);
+    log.warn('views.open returned no view id');
     return { reason: 'No view id', status: 'error' };
   }
 
@@ -286,13 +288,11 @@ async function handleSlashCommand(
   try {
     session = await getLatestActiveSessionForUserInChannel(storeConfig, cmd.channel_id, cmd.user_id);
   } catch (error: unknown) {
-    console.warn(`[${requestId}] [slash] active-session lookup failed: ${errMsg(error)}`);
+    log.warn('active-session lookup failed', { err_message: errMsg(error) });
   }
 
   if (!session) {
-    console.log(
-      `[${requestId}] [slash] no active session for user=${cmd.user_id} channel=${cmd.channel_id} — showing error modal`
-    );
+    log.info('no active session — showing error modal', { channel: cmd.channel_id, user: cmd.user_id });
     try {
       await updateView(
         viewId,
@@ -302,7 +302,7 @@ async function handleSlashCommand(
         slackBotToken
       );
     } catch (error: unknown) {
-      console.warn(`[${requestId}] [slash] views.update (error) failed: ${errMsg(error)}`);
+      log.warn('views.update (error modal) failed', { err_message: errMsg(error) });
     }
     return { mode: 'feedback_no_session', status: 'success' };
   }
@@ -316,10 +316,10 @@ async function handleSlashCommand(
   };
   try {
     await updateView(viewId, buildFeedbackModal(ctx), slackBotToken);
-    console.log(`[${requestId}] [slash] /sda-feedback form rendered for session=${session.sessionId}`);
+    log.info('/sda-feedback form rendered', { session_id: session.sessionId });
     return { mode: 'feedback_modal_opened', session_id: session.sessionId, status: 'success' };
   } catch (error: unknown) {
-    console.error(`[${requestId}] [slash] views.update failed: ${errMsg(error)}`);
+    log.error('views.update (feedback form) failed', { err_message: errMsg(error) });
     return { details: errMsg(error), reason: 'views.update failed', status: 'error' };
   }
 }
@@ -334,13 +334,14 @@ async function handleViewSubmission(
   storeConfig: StoreConfig,
   requestId: string
 ): Promise<any> {
+  const log = createLogger(requestId, LOG_TAG.FEEDBACK);
   if (payload.view?.callback_id !== FEEDBACK_VIEW_CALLBACK) {
     return { reason: `Unhandled view callback_id: ${payload.view?.callback_id}`, status: 'ignored' };
   }
 
   const ctx = decodeContext(payload.view.private_metadata);
   if (!ctx) {
-    console.warn(`[${requestId}] [feedback] submit: invalid private_metadata`);
+    log.warn('submit: invalid private_metadata');
     return responseActionErrors({
       [FEEDBACK_BLOCK_RATING]: 'We could not identify your session. Please close this form and try again.',
     });
@@ -370,15 +371,15 @@ async function handleViewSubmission(
       sessionRecord = await getLatestActiveSessionForUserInChannel(storeConfig, ctx.channel, ctx.userId);
     }
   } catch (error: unknown) {
-    console.warn(`[${requestId}] [feedback] session lookup failed: ${errMsg(error)}`);
+    log.warn('session lookup failed', { err_message: errMsg(error) });
   }
 
   if (!sessionRecord) {
-    console.warn(
-      `[${requestId}] [feedback] no active session for sessionId=${ctx.sessionId || '∅'} channel=${
-        ctx.channel || '∅'
-      } user=${ctx.userId || '∅'}`
-    );
+    log.warn('no active session found', {
+      channel: ctx.channel || '∅',
+      session_id: ctx.sessionId || '∅',
+      user: ctx.userId || '∅',
+    });
     return responseActionErrors({
       [FEEDBACK_BLOCK_RATING]:
         'No active SDA Agent conversation was found in this channel. Start a conversation with the bot, then try again.',
@@ -392,11 +393,9 @@ async function handleViewSubmission(
       feedbackSubmittedAt: submittedAt,
       feedbackText: comment,
     });
-    console.log(
-      `[${requestId}] [feedback] persisted session=${ctx.sessionId} rating=${rating} comment_chars=${comment.length}`
-    );
+    log.info('persisted feedback', { comment_chars: comment.length, rating, session_id: ctx.sessionId });
   } catch (error: unknown) {
-    console.error(`[${requestId}] [feedback] patchSession failed: ${errMsg(error)}`);
+    log.error('patchSession failed', { err_message: errMsg(error) });
     return responseActionErrors({
       [FEEDBACK_BLOCK_RATING]: 'We could not save your feedback right now. Please try again.',
     });
@@ -424,7 +423,7 @@ async function handleViewSubmission(
         confirmThread
       );
     } catch (err: unknown) {
-      console.warn(`[${requestId}] [feedback] ephemeral send failed: ${errMsg(err)}`);
+      log.warn('ephemeral confirmation send failed', { err_message: errMsg(err) });
     }
   }
 

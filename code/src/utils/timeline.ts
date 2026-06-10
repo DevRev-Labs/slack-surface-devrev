@@ -11,6 +11,12 @@
 
 import axios from 'axios';
 
+import { LOG_TAG } from '../config';
+import { createLogger } from './logger';
+
+// Module-level logger for timeline operations.
+const log = createLogger(undefined, LOG_TAG.TIMELINE);
+
 export interface PostTimelineCommentArgs {
   devrevEndpoint: string;
   token: string;
@@ -40,7 +46,7 @@ export async function postTimelineComment(args: PostTimelineCommentArgs): Promis
     });
     return response.data?.timeline_entry?.id || null;
   } catch (error: any) {
-    console.warn('[timeline] timeline_comment create failed', {
+    log.warn('timeline_comment create failed', {
       conversation_id: conversationId,
       err_data: error?.response?.data,
       err_status: error?.response?.status,

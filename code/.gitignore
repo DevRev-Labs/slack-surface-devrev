@@ -1,42 +1,102 @@
-# See http://help.github.com/ignore-files/ for more about ignoring files.
-
-# compiled output
+# ──────────────────────────────────────────────────────────────────────────────
+# Compiled output
+# ──────────────────────────────────────────────────────────────────────────────
 /dist
-/tmp
+/out
 /out-tsc
+/tmp
+*.js.map
+*.d.ts.map
 
-# Testing
+# ──────────────────────────────────────────────────────────────────────────────
+# Package archives (snap-in deploy artefact)
+# ──────────────────────────────────────────────────────────────────────────────
+*.tar.gz
+*.tgz
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Dependencies
+# ──────────────────────────────────────────────────────────────────────────────
+node_modules/
+.npm/
+.pnpm-store/
+.yarn/cache
+.yarn/unplugged
+.yarn/build-state.yml
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Test artefacts
+# ──────────────────────────────────────────────────────────────────────────────
 coverage/
+.nyc_output/
+junit.xml
+test-results/
 
-# dependencies
-/node_modules
+# ──────────────────────────────────────────────────────────────────────────────
+# Environment files — NEVER commit secrets
+# ──────────────────────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+!.env.test.example
 
-# IDEs and editors
-/.idea
+# ──────────────────────────────────────────────────────────────────────────────
+# DevRev snap-in local runner artefacts
+# ──────────────────────────────────────────────────────────────────────────────
+deps.json
+results.json
+before-run-data.json
+
+# ──────────────────────────────────────────────────────────────────────────────
+# IDE and editor files
+# ──────────────────────────────────────────────────────────────────────────────
+.idea/
+*.iml
+*.ipr
+*.iws
 .project
 .classpath
 .c9/
 *.launch
 .settings/
 *.sublime-workspace
+*.sublime-project
 
-# IDE - VSCode
+# VSCode — keep shared workspace settings, ignore personal overrides
 .vscode/*
 !.vscode/settings.json
 !.vscode/tasks.json
 !.vscode/launch.json
 !.vscode/extensions.json
 
-# System Files
+# ──────────────────────────────────────────────────────────────────────────────
+# OS-generated files
+# ──────────────────────────────────────────────────────────────────────────────
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
 Thumbs.db
+ehthumbs.db
+Desktop.ini
 
-deps.json
-results.json
-before-run-data.json
+# ──────────────────────────────────────────────────────────────────────────────
+# Logs
+# ──────────────────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
 
-# packaged app
-*.tar.gz
-
-# node_modules
-node_modules
+# ──────────────────────────────────────────────────────────────────────────────
+# Misc build caches
+# ──────────────────────────────────────────────────────────────────────────────
+.cache/
+.parcel-cache/
+.eslintcache
+.stylelintcache
+.tsbuildinfo
+*.tsbuildinfo

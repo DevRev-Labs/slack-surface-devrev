@@ -6,7 +6,11 @@
 
 import axios from 'axios';
 
-const SLACK_API_BASE = 'https://slack.com/api';
+import { LOG_TAG, SLACK_API_BASE } from '../config';
+import { createLogger } from './logger';
+
+// Module-level logger for all Slack Web API calls.
+const log = createLogger(undefined, LOG_TAG.SLACK);
 
 /**
  * Response from Slack API chat methods.
@@ -90,7 +94,7 @@ export async function sendMessage(channel: string, text: string, botToken: strin
 
     return response.data.ts ?? '';
   } catch (error: any) {
-    console.error('Slack sendMessage error:', error.response?.data || error.message);
+    log.error('sendMessage failed', { err_data: error.response?.data, err_message: error.message });
     throw new Error(`Failed to send message to Slack: ${error.message}`);
   }
 }
@@ -122,7 +126,7 @@ export async function postEphemeral(
       throw new Error(`Slack API error: ${response.data.error}`);
     }
   } catch (error: any) {
-    console.error('Slack postEphemeral error:', error.response?.data || error.message);
+    log.error('postEphemeral failed', { err_data: error.response?.data, err_message: error.message });
     throw new Error(`Failed to send ephemeral message: ${error.message}`);
   }
 }
@@ -149,7 +153,7 @@ export async function openView(triggerId: string, view: any, botToken: string): 
     }
     return response.data.view?.id || '';
   } catch (error: any) {
-    console.error('Slack openView error:', error.response?.data || error.message);
+    log.error('openView failed', { err_data: error.response?.data, err_message: error.message });
     throw new Error(`Failed to open Slack view: ${error.message}`);
   }
 }
@@ -170,7 +174,7 @@ export async function updateView(viewId: string, view: any, botToken: string): P
       throw new Error(`Slack API error: ${response.data.error}`);
     }
   } catch (error: any) {
-    console.error('Slack updateView error:', error.response?.data || error.message);
+    log.error('updateView failed', { err_data: error.response?.data, err_message: error.message });
     throw new Error(`Failed to update Slack view: ${error.message}`);
   }
 }
@@ -204,7 +208,7 @@ export async function updateMessage(channel: string, ts: string, text: string, b
       throw new Error(`Slack API error: ${response.data.error}`);
     }
   } catch (error: any) {
-    console.error('Slack updateMessage error:', error.response?.data || error.message);
+    log.error('updateMessage failed', { err_data: error.response?.data, err_message: error.message });
     throw new Error(`Failed to update message in Slack: ${error.message}`);
   }
 }
@@ -239,7 +243,7 @@ export async function deleteMessage(channel: string, ts: string, botToken: strin
       }
     }
   } catch (error: any) {
-    console.error('Slack deleteMessage error:', error.response?.data || error.message);
+    log.error('deleteMessage failed', { err_data: error.response?.data, err_message: error.message });
     // Don't throw for delete failures - it's not critical
   }
 }
@@ -256,7 +260,7 @@ export async function getUserProfile(userId: string, botToken: string): Promise<
     });
 
     if (!response.data.ok) {
-      console.error(`Slack users.info error: ${response.data.error}`);
+      log.error('users.info API error', { error: response.data.error });
       return { email: null, name: null };
     }
 
@@ -267,7 +271,7 @@ export async function getUserProfile(userId: string, botToken: string): Promise<
       name: name && name.trim() ? name.trim() : null,
     };
   } catch (error: any) {
-    console.error('Slack getUserProfile error:', error.response?.data || error.message);
+    log.error('getUserProfile failed', { err_data: error.response?.data, err_message: error.message });
     return { email: null, name: null };
   }
 }
@@ -285,13 +289,13 @@ export async function getChannelName(channelId: string, botToken: string): Promi
     });
 
     if (!response.data.ok) {
-      console.warn(`Slack conversations.info error for ${channelId}: ${response.data.error}`);
+      log.warn('conversations.info API error', { channel_id: channelId, error: response.data.error });
       return null;
     }
 
     return response.data.channel?.name || null;
   } catch (error: any) {
-    console.warn('Slack getChannelName error:', error.response?.data || error.message);
+    log.warn('getChannelName failed', { err_data: error.response?.data, err_message: error.message });
     return null;
   }
 }

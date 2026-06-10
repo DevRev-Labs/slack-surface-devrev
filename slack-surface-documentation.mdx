@@ -1,0 +1,165 @@
+# Slack AI Assistant
+
+## Overview
+
+The **Slack AI Assistant** snap-in connects your Slack workspace to DevRev AI Agents, enabling your team to have intelligent, context-aware conversations directly in Slack DMs. When a user sends a message to the Slack bot, the snap-in routes it to a DevRev AI Agent, receives the response asynchronously, and posts it back into the same Slack thread — all without any manual intervention.
+
+Sessions are automatically managed: each user gets a dedicated session tied to a DevRev conversation object, with configurable idle and absolute timeouts. A background garbage collector keeps the system clean by expiring and deleting stale sessions on a 30-minute schedule.
+
+---
+
+## Prerequisites
+
+Before you install the snap-in, create a Slack App in your workspace and gather the credentials it needs.
+
+1. Sign in to [api.slack.com/apps](https://api.slack.com/apps) with a Slack workspace admin account.
+2. Click **Create New App → From scratch**, give it a name (for example, `DevRev AI Assistant`), and select your workspace.
+3. Go to **OAuth & Permissions → Bot Token Scopes** and add all of the following scopes:
+   - `chat:write` — send and update messages
+   - `users:read` — look up user profiles
+   - `users:read.email` — resolve a Slack user's email to a DevRev user
+   - `app_mentions:read` — receive @mention events
+   - `commands` — required for the `/sda-feedback` slash command
+4. Click **Install to Workspace** and copy the **Bot User OAuth Token** (starts with `xoxb-`). This is your **Slack Bot Token**.
+5. Go to **Basic Information** and copy the **Signing Secret**. The snap-in uses this to verify every inbound Slack request.
+6. Note the **Request URL** shown during snap-in installation (for example, `https://api.devrev.ai/...`). You will paste this same URL into three places in your Slack App:
+   - **Event Subscriptions → Request URL** — subscribe to bot events `app_mention` and optionally `message.im`
+   - **Slash Commands → `/sda-feedback`** — paste the same URL as the request URL
+   - **Interactivity & Shortcuts → Request URL** — toggle Interactivity on and paste the URL
+7. In DevRev, locate the AI Agent you want to power the conversations and copy its **Agent ID**.
+
+> **Note:** The snap-in only processes direct messages (DMs) sent to the bot and `app_mention` events. It does not read messages in public or private channels.
+
+---
+
+## Installation
+
+1. In DevRev, open the **Snap-in marketplace** and search for **Slack AI Assistant**.
+2. Select the snap-in and click **Install**.
+3. When prompted, create two keyrings:
+   - **Slack Bot Token** keyring — paste the `xoxb-` token from step 4 above.
+   - **Slack Signing Secret** keyring — paste the signing secret from step 5 above.
+4. During snap-in configuration, enter your **AI Agent ID** in the organization inputs.
+5. Complete the installation. The snap-in webhook URL is displayed in the event source setup instructions — copy it and paste it into the three Slack App URL fields described in the prerequisites.
+6. Send a DM to your bot in Slack to verify the connection is working.
+
+---
+
+## Configuration
+
+The following inputs are configured at the organization level during snap-in installation:
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| **AI Agent ID** | Yes | — | The DevRev AI Agent ID that processes all incoming Slack messages. |
+| **Mock Email Address** | No | — | Override the Slack sender's email with this address for testing. Useful for routing all test messages through a known DevRev user. Leave blank in production. |
+| **Session idle timeout (minutes)** | No | 480 (8 h) | Minutes of user inactivity before the session is marked idle-expired. The user receives an expiry notification; the conversation record is kept until the absolute timeout. |
+| **Session absolute timeout (hours)** | No | 24 h | Maximum lifetime of a session in hours, regardless of activity. After this elapses the DevRev conversation object is permanently deleted. |
+
+The snap-in also requires two keyrings:
+
+| Keyring | Description |
+|---------|-------------|
+| **Slack Bot Token** | The `xoxb-` OAuth token from your Slack App. Used to post messages and look up user profiles. |
+| **Slack Signing Secret** | The signing secret from your Slack App's Basic Information page. Used to verify the HMAC-SHA256 signature on every inbound request. |
+
+---
+
+## How it works
+
+### Message flow
+
+1. A Slack user sends a direct message to the bot (or @mentions it).
+2. Slack delivers the event to the snap-in's webhook URL as an `event_callback` payload.
+3. The **slack_handler** function validates the Slack request signature, deduplicates the event, and resolves the sender's email to a DevRev user.
+4. The handler creates or resumes the user's session (backed by a DevRev conversation object), then calls `aiAgentEventsExecuteAsync` to dispatch the message to the configured AI Agent.
+5. The AI Agent processes the message and emits an `ai_agent_response` event.
+6. The **ai_response_handler** function receives the response event, looks up the active session, and posts the AI's reply into the original Slack thread.
+7. Both the user's message and the AI's response are appended as timeline entries on the DevRev conversation object.
+
+### Session lifecycle
+
+Each user has at most one active session at a time. A session transitions through the following states:
+
+| State | Description |
+|-------|-------------|
+| `active` | Session is live; messages are accepted and forwarded to the AI Agent. |
+| `expired` | Idle timeout elapsed; the user has been notified. No new messages are forwarded. |
+| `ended` | The user explicitly ended the session via a Block Kit button, or the absolute timeout elapsed. |
+| `deleted` | The DevRev conversation object has been removed by the GC. |
+
+The **session_gc** function runs every 30 minutes (cron `*/30 * * * *`) and:
+- Marks sessions idle-expired when `lastUsedAt` is older than the configured idle timeout.
+- Deletes conversation objects for sessions that have passed the absolute timeout.
+
+### User impersonation
+
+When a Slack user's email matches a DevRev user, the snap-in mints a short-lived **act-as token** via `authTokensCreate` with `act_as` set to that user's DevRev ID. This means the AI Agent execution and conversation writes are attributed to the real DevRev user rather than the service account, preserving proper audit trails and personalizing AI Agent context.
+
+If the email cannot be resolved (for example, when `mock_email_address` is not set and the Slack user has no matching DevRev account), the snap-in falls back to executing as the service account.
+
+### Block Kit interactions
+
+The **slack_interactivity** function handles all Slack Block Kit button clicks and modal submissions, including:
+- **Feedback buttons** — thumbs up/down ratings posted after an AI response. The rating is stored on the session record.
+- **End session** — a button that immediately marks the session as ended.
+
+---
+
+## Result outputs
+
+After each AI Agent response, the following are updated:
+
+| Output | Where it appears |
+|--------|-----------------|
+| AI response text | Posted as a reply in the originating Slack thread |
+| User message | Appended as a timeline entry on the DevRev conversation object |
+| AI response | Appended as a timeline entry on the DevRev conversation object |
+| Feedback rating | Stored on the session record when the user clicks a feedback button |
+
+---
+
+## Verifying the connection
+
+After installation, confirm the snap-in is working end-to-end:
+
+1. **Send a DM to the bot** — open Slack, find the bot user, and send "hello". You should receive a reply within a few seconds.
+2. **Check snap-in logs** — in DevRev, open the snap-in details and view the **Logs** tab for the `slack_handler` and `ai_response_handler` functions. Look for `info`-level entries confirming the event was received and the AI Agent was called.
+3. **Check the DevRev conversation** — in DevRev, navigate to **Conversations** and look for a record with a title matching your Slack channel or DM. Verify the timeline entries show both your message and the AI's reply.
+4. **Verify signature validation** — if you send a request with a tampered body, the `slack_handler` should reject it with a `401` and log a warning.
+
+---
+
+## Limitations
+
+| Constraint | Value |
+|------------|-------|
+| Supported message types | Direct messages (DMs) and `app_mention` events only; public/private channel messages are ignored |
+| Active sessions per user | 1 — starting a new conversation while one is active resumes the existing session |
+| Maximum message length accepted | Determined by Slack's API limit (no additional truncation by the snap-in) |
+| AI Agent execution mode | Asynchronous only (`aiAgentEventsExecuteAsync`); response latency depends on the AI Agent |
+| Session GC interval | Every 30 minutes; expired sessions are not cleaned up instantly |
+| Attachment support | Not supported — the snap-in processes text messages only |
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely cause | Resolution |
+|---------|--------------|------------|
+| Bot does not reply to messages | Slack event subscriptions not configured, or the Request URL is wrong. | Confirm the webhook URL in **Event Subscriptions** matches the URL shown in the snap-in's event source setup instructions. |
+| `invalid_signature` error in logs | The **Slack Signing Secret** keyring value is incorrect. | Re-enter the signing secret from **Basic Information** in your Slack App. |
+| Session not expiring / GC not running | The `session-gc-timer` event source is not active. | Verify the snap-in is installed and the `session_gc` automation is enabled in the snap-in details. |
+| AI response not delivered to Slack | The `ai-agent-events` event source is not receiving events, or the `ai_response_handler` errored. | Check snap-in logs for the `ai_response_handler` function. Confirm the AI Agent ID is correct. |
+| `user_not_found` in logs (act-as token fails) | The Slack user's email does not match any DevRev user. | Set a **Mock Email Address** for testing, or ensure the Slack user's primary email is registered in DevRev. |
+| Block Kit buttons return an error to Slack | The `slack_interactivity` function errored before returning a `200`. | Check snap-in logs for `slack_interactivity`. The function must acknowledge within 3 seconds of the Slack request. |
+
+---
+
+## Best practices
+
+- **Set a sensible idle timeout.** The default of 8 hours works for most teams, but if your users tend to abandon conversations, a shorter timeout (60–120 minutes) keeps your DevRev conversation list clean.
+- **Rotate keyrings before they expire.** If you regenerate your Slack Bot Token or Signing Secret in the Slack App, update both keyrings in the snap-in immediately to avoid downtime.
+- **Use Mock Email Address only for testing.** This field bypasses normal email resolution and should be left blank in production to ensure user impersonation works correctly.
+- **Monitor GC logs.** After the snap-in has been running for a few days, check the `session_gc` logs to confirm expired sessions are being cleaned up. If the delete count is unexpectedly high, consider increasing the absolute timeout.
+- **Test interactivity separately.** Block Kit button clicks go through the `slack_interactivity` function, not `slack_handler`. Test feedback buttons explicitly after verifying basic message flow works.

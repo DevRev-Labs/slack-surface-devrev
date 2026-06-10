@@ -5,7 +5,9 @@ import {
   SchemaFieldDescriptor,
 } from '@devrev/typescript-sdk/dist/auto-generated/beta/beta-devrev-sdk';
 
+import { LOG_TAG } from '../../config';
 import { FunctionInput } from '../../types';
+import { createLogger } from '../../utils/logger';
 import { SESSION_LEAF_TYPE, SESSION_LEAF_TYPE_DESCRIPTION } from '../../utils/session-config';
 import { SchemaFieldSpec, SESSION_FIELD_SPECS } from '../../utils/session-fields';
 
@@ -63,11 +65,12 @@ async function ensureSessionStateSchema(event: FunctionInput): Promise<any> {
       type: CustomSchemaFragmentsSetRequestType.TenantFragment,
     };
 
+    const log = createLogger(requestId, LOG_TAG.CONFIG);
     try {
       const response = await devrevSdk.customSchemaFragmentsSet(payload);
-      console.log(`[${requestId}] Ensured schema`, {
-        leafType: spec.leaf_type,
-        schemaId: response.data?.id || '',
+      log.info('Ensured schema', {
+        leaf_type: spec.leaf_type,
+        schema_id: response.data?.id || '',
       });
       results.push({
         leaf_type: spec.leaf_type,
@@ -76,10 +79,11 @@ async function ensureSessionStateSchema(event: FunctionInput): Promise<any> {
       });
     } catch (error: any) {
       hadError = true;
-      console.error(
-        `[${requestId}] Failed to ensure schema ${spec.leaf_type}:`,
-        error?.response?.data || error?.message || error
-      );
+      log.error('Failed to ensure schema', {
+        err_data: error?.response?.data,
+        err_message: error?.message || error,
+        leaf_type: spec.leaf_type,
+      });
       results.push({
         error: error?.message || 'Unknown error',
         leaf_type: spec.leaf_type,

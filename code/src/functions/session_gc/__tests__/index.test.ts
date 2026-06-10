@@ -137,4 +137,57 @@ describe('session_gc', () => {
     expect(result.reason).toContain('missing');
     expect(mockedSessionStore.listIdleExpiredSessions).not.toHaveBeenCalled();
   });
+
+  test('handles listIdleExpiredSessions rejection gracefully (continues to hard sweep)', async () => {
+    mockedSessionStore.listIdleExpiredSessions.mockRejectedValue(new Error('list idle failed'));
+    const hard = makeRecord({ objectId: 'co-h', sessionId: 'uuid-h' });
+    mockedSessionStore.listHardExpiredSessions.mockResolvedValue([hard]);
+
+    const result = await run([mockEvent]);
+
+    // Hard sweep still ran even though idle list failed.
+    expect(mockedSessionStore.deleteSession).toHaveBeenCalled();
+    expect(result.status).toBe('success');
+  });
+
+  test('handles listHardExpiredSessions rejection gracefully', async () => {
+    mockedSessionStore.listHardExpiredSessions.mockRejectedValue(new Error('list hard failed'));
+
+    const result = await run([mockEvent]);
+
+    expect(mockedSessionStore.deleteSession).not.toHaveBeenCalled();
+    expect(result.status).toBe('success');
+  });
+
+  test('handles endSession failure without stopping remaining iterations', async () => {
+    const idle1 = makeRecord({ sessionId: 'idle-1' });
+    const idle2 = makeRecord({ sessionId: 'idle-2' });
+    mockedSessionStore.listIdleExpiredSessions.mockResolvedValue([idle1, idle2]);
+    mockedSessionStore.endSession
+      .mockRejectedValueOnce(new Error('endSession failed'))
+      .mockResolvedValueOnce({} as any);
+
+    const result = await run([mockEvent]);
+
+    // Both sessions were attempted even though the first failed.
+    expect(mockedSessionStore.endSession).toHaveBeenCalledTimes(2);
+    expect(result.idle_marked).toBe(2);
+  });
+
+  test('multiple events return an array of results', async () => {
+    const results = await run([mockEvent, mockEvent]);
+    expect(Array.isArray(results)).toBe(true);
+    expect(results).toHaveLength(2);
+  });
+
+  test('run() catches uncaught errors from runGc', async () => {
+    // Make listIdleExpiredSessions throw synchronously to simulate an
+    // unexpected error (not a rejected promise) bubbling up.
+    mockedSessionStore.listIdleExpiredSessions.mockImplementation(() => {
+      throw new Error('unexpected crash');
+    });
+
+    const result = await run([mockEvent]);
+    expect(result.status).toBe('error');
+  });
 });
