@@ -38,6 +38,8 @@ import {
 } from './types';
 
 const app: Express = express();
+// Avoid leaking framework details via the X-Powered-By header.
+app.disable('x-powered-by');
 app.use(bodyParser.json(), bodyParser.urlencoded({ extended: false }));
 
 export const startServer = (port: number) => {
@@ -50,7 +52,7 @@ export const startServer = (port: number) => {
 app.post('/handle/async', async (req: Request, resp: Response) => {
   const events = req.body;
   if (events === undefined) {
-    resp.status(400).send('Invalid request format: body is undefined');
+    resp.status(400).json({ error: 'Invalid request format: body is undefined' });
     return;
   }
 
@@ -59,7 +61,7 @@ app.post('/handle/async', async (req: Request, resp: Response) => {
 
 app.post('/handle/sync', async (req: Request, resp: Response) => {
   if (req.body === undefined) {
-    resp.status(400).send('Invalid request format: body is undefined');
+    resp.status(400).json({ error: 'Invalid request format: body is undefined' });
     return;
   }
   // for sync invokation, wrap in an array
@@ -84,7 +86,7 @@ async function handleEvent(events: any[], isAsync: boolean, resp: Response) {
       err_type: RuntimeErrorType.InvalidRequest,
     } as RuntimeError;
     console.error(error.err_msg);
-    resp.status(400).send(errMsg);
+    resp.status(400).json({ error: errMsg });
     return;
   }
   // if the request is synchronous, there should be a single event
@@ -96,12 +98,12 @@ async function handleEvent(events: any[], isAsync: boolean, resp: Response) {
         err_type: RuntimeErrorType.InvalidRequest,
       } as RuntimeError;
       console.error(error.err_msg);
-      resp.status(400).send(errMsg);
+      resp.status(400).json({ error: errMsg });
       return;
     }
   } else {
     // return a success response back to the server
-    resp.status(200).send();
+    resp.status(200).end();
   }
 
   // Allow-list of functions exposed by this snap-in. Restricting the
@@ -159,7 +161,7 @@ async function handleEvent(events: any[], isAsync: boolean, resp: Response) {
   }
 
   if (!isAsync) {
-    resp.status(200).send(results[0]);
+    resp.status(200).json(results[0]);
   }
 }
 

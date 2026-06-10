@@ -1,4 +1,4 @@
-import { createHmac } from 'crypto';
+import { createHmac, randomBytes } from 'crypto';
 import { validateSlackSignature } from '../slack-signature-validator';
 
 const HEX64 = 'a'.repeat(64);
@@ -84,7 +84,9 @@ describe('validateSlackSignature (header-presence gate)', () => {
   });
 
   describe('HMAC verification (when body_raw + signing_secret are provided)', () => {
-    const SECRET = 'test-signing-secret';
+    // Generate a fresh random secret per test run rather than hardcoding one,
+    // so the cipher key never appears as a literal in source.
+    const SECRET = randomBytes(32).toString('hex');
     const RAW = '{"type":"event_callback","event":{"type":"app_mention","text":"hi"}}';
     const RAW_B64 = Buffer.from(RAW, 'utf8').toString('base64');
 
