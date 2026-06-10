@@ -21,12 +21,24 @@ service_account:
       - scope: conversation:write
         optional: false
         reason: "Create/update/delete conversations as the persistent backing store for Slack ↔ DevRev AI sessions, and append timeline entries mirroring user queries and AI Agent responses."
+      - scope: conversation:all
+        optional: false
+        reason: "Broad conversation access for the snap-in's session backing store: list-and-filter active sessions, dedup placeholder activities, and unify read/write paths under a single scope when finer-grained scopes are insufficient."
     impersonate:
       - act_as: all_devusers
         scopes:
           - scope: ai_agent:execute
             optional: false
             reason: "Run AI Agent on behalf of the resolved Dev user via /internal/ai-agents.events.execute-async after minting an act-as token."
+          - scope: conversation:read
+            optional: false
+            reason: "Look up conversation status when sweeping sessions on behalf of the user."
+          - scope: conversation:write
+            optional: false
+            reason: "Delete or update conversations during session GC when acting as the original session owner."
+          - scope: conversation:all
+            optional: false
+            reason: "Broad conversation access for the snap-in's session backing store: list-and-filter active sessions, dedup placeholder activities, and unify read/write paths under a single scope when finer-grained scopes are insufficient."
 
 inputs:
   organization:
