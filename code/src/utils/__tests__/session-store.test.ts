@@ -110,6 +110,7 @@ function emptyRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     devrevUserId: '',
     endReason: '',
     expiresAt: 0,
+    feedbackPromptTs: '',
     feedbackRating: 0,
     feedbackSubmittedAt: 0,
     feedbackText: '',

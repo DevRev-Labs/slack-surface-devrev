@@ -32,13 +32,24 @@ import {
   StoreConfig,
   touchSession,
 } from '../../utils/session-store';
-import { getChannelName, getUserProfile, removeBotMention, sendMessage } from '../../utils/slack-client';
+import { getChannelName, getUserProfile, removeBotMention, sendMessage, updateMessage } from '../../utils/slack-client';
 import { validateSlackSignature } from '../../utils/slack-signature-validator';
 import { postTimelineComment } from '../../utils/timeline';
 
 const FORBIDDEN_RESPONSE = { status: 'forbidden', status_code: 403 };
 
 const RESET_INTENT_PHRASES = new Set(['new session', '/clear']);
+
+function readSlackHeader(headers: Record<string, any> | undefined, name: string): string | undefined {
+  if (!headers) return undefined;
+  const target = name.toLowerCase();
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === target) {
+      return Array.isArray(v) ? String(v[0] ?? '') : String(v ?? '');
+    }
+  }
+  return undefined;
+}
 
 /**
  * Find or create the right session for this Slack message.
@@ -124,6 +135,21 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
   if (!sigCheck.valid) {
     console.warn(`[${requestId}] [auth] Slack signature rejected: ${sigCheck.reason}`);
     return FORBIDDEN_RESPONSE;
+  }
+
+  // Slack retries Events API delivery if it doesn't get a 200 within ~3s.
+  // Cold-start latency can blow that budget on the first call; the retry
+  // then races the original invocation and produces a duplicate placeholder
+  // + a duplicate AI-Agent submission. The original is still in-flight, so
+  // we ack the retry with 200 and exit before any Slack call or session
+  // write happens.
+  const retryNum = readSlackHeader(requestHeaders, 'x-slack-retry-num');
+  if (retryNum) {
+    const retryReason = readSlackHeader(requestHeaders, 'x-slack-retry-reason');
+    console.log(
+      `[${requestId}] [retry] dropping Slack retry attempt=${retryNum} reason=${retryReason ?? 'unspecified'}`
+    );
+    return { reason: 'Slack retry — original in flight', status: 'ignored' };
   }
 
   const slackEvent = slackBody?.event;
@@ -417,15 +443,31 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
   } catch (error: any) {
     console.error(`[${requestId}] [AI] Async API error: ${error.message}`);
 
+    // Replace the "⏳ Searching..." placeholder in place with the
+    // error text so we don't leave an orphaned placeholder + a
+    // separate error message in the channel. If we never posted a
+    // placeholder, fall back to a fresh message.
     if (config.slackBotToken) {
-      await sendMessage(
-        conversationRef.channel,
-        'Sorry, I encountered an error processing your request. Please try again.',
-        config.slackBotToken,
-        threadTs
-      ).catch(() => {
-        /* swallow */
-      });
+      const errorText = 'Sorry, I encountered an error processing your request. Please try again.';
+      const placeholderTs = conversationRef.tempMessageTs;
+      if (placeholderTs) {
+        try {
+          await updateMessage(conversationRef.channel, placeholderTs, errorText, config.slackBotToken);
+        } catch (updateErr: any) {
+          console.warn(
+            `[${requestId}] [AI] failed to overwrite placeholder with error (${
+              updateErr?.message || updateErr
+            }); sending fresh message`
+          );
+          await sendMessage(conversationRef.channel, errorText, config.slackBotToken, threadTs).catch(() => {
+            /* swallow */
+          });
+        }
+      } else {
+        await sendMessage(conversationRef.channel, errorText, config.slackBotToken, threadTs).catch(() => {
+          /* swallow */
+        });
+      }
     }
 
     return {

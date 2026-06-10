@@ -33,6 +33,7 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     devrevUserId: '',
     endReason: '',
     expiresAt: 0,
+    feedbackPromptTs: '',
     feedbackRating: 0,
     feedbackSubmittedAt: 0,
     feedbackText: '',
@@ -90,6 +91,7 @@ describe('slack_interactivity', () => {
     mockedSlackClient.openView.mockResolvedValue('view-id-1');
     mockedSlackClient.updateView.mockResolvedValue();
     mockedSlackClient.postEphemeral.mockResolvedValue();
+    mockedSlackClient.deleteMessage.mockResolvedValue();
     mockedSessionStore.getLatestActiveSessionForUserInChannel.mockResolvedValue(makeRecord());
     mockedSessionStore.getSessionById.mockResolvedValue(makeRecord());
     mockedSessionStore.patchSession.mockImplementation(async (_c, r) => r);
@@ -213,6 +215,38 @@ describe('slack_interactivity', () => {
       expect(result.view?.title?.text).toMatch(/feedback/i);
     });
 
+    test('on submit: deletes the lingering feedback prompt and clears its ts', async () => {
+      mockedSessionStore.getSessionById.mockResolvedValue(
+        makeRecord({ feedbackPromptTs: 'prompt-ts-99', sessionId: 'sess-1' })
+      );
+      const ctx = encodeContext({ channel: 'C1', sessionId: 'sess-1' });
+      await run([
+        makeBaseEvent({
+          type: 'view_submission',
+          user: { id: 'Usubmitter' },
+          view: {
+            callback_id: FEEDBACK_VIEW_CALLBACK,
+            private_metadata: ctx,
+            state: {
+              values: {
+                [FEEDBACK_BLOCK_RATING]: {
+                  [FEEDBACK_ACTION_RATING]: { selected_option: { value: '5' } },
+                },
+              },
+            },
+          },
+        }),
+      ]);
+      // Persist clears the prompt-ts field.
+      expect(mockedSessionStore.patchSession).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({ feedbackPromptTs: null, feedbackRating: 5 })
+      );
+      // Slack message deleted.
+      expect(mockedSlackClient.deleteMessage).toHaveBeenCalledWith('C1', 'prompt-ts-99', 'xoxb-test');
+    });
+
     test('surfaces validation error when no rating selected', async () => {
       const ctx = encodeContext({ channel: 'C1', sessionId: 'sess-1' });
       const result = await run([
@@ -297,10 +331,46 @@ describe('slack_interactivity', () => {
     expect(mockedSlackClient.openView).not.toHaveBeenCalled();
   });
 
-  test('ignores view_closed and block_actions', async () => {
-    const r1 = await run([makeBaseEvent({ type: 'view_closed' })]);
-    const r2 = await run([makeBaseEvent({ type: 'block_actions' })]);
-    expect(r1.status).toBe('ignored');
-    expect(r2.status).toBe('ignored');
+  test('ignores view_closed', async () => {
+    const r = await run([makeBaseEvent({ type: 'view_closed' })]);
+    expect(r.status).toBe('ignored');
+  });
+
+  test('ignores block_actions with no actions', async () => {
+    const r = await run([makeBaseEvent({ actions: [], type: 'block_actions' })]);
+    expect(r.status).toBe('ignored');
+  });
+
+  test('block_actions: opens loading modal first, then updates with real form (two-stage)', async () => {
+    const ctxValue = encodeContext({ channel: 'C-ended', sessionId: 'sess-ended', userId: 'U1' });
+    const result = await run([
+      makeBaseEvent({
+        actions: [{ action_id: 'feedback_open_from_prompt', value: ctxValue }],
+        trigger_id: 'trig-click',
+        type: 'block_actions',
+      }),
+    ]);
+    // Stage 1: trigger_id consumed by views.open with the loading shell
+    // (no submit button — only the real form has one).
+    expect(mockedSlackClient.openView).toHaveBeenCalledWith(
+      'trig-click',
+      expect.objectContaining({
+        callback_id: FEEDBACK_VIEW_CALLBACK,
+        close: expect.anything(),
+      }),
+      'xoxb-test'
+    );
+    const openCall = mockedSlackClient.openView.mock.calls[0];
+    expect(openCall[1].submit).toBeUndefined();
+    // Stage 2: views.update swapped in the real form (which has submit).
+    expect(mockedSlackClient.updateView).toHaveBeenCalledWith(
+      'view-id-1',
+      expect.objectContaining({
+        callback_id: FEEDBACK_VIEW_CALLBACK,
+        submit: expect.anything(),
+      }),
+      'xoxb-test'
+    );
+    expect(result.session_id).toBe('sess-ended');
   });
 });

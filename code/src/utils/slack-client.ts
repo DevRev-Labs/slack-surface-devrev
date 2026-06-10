@@ -66,7 +66,16 @@ export interface SlackUserProfile {
  * @param threadTs Optional thread timestamp to reply in a thread.
  * @returns The message timestamp (ts) which serves as the message ID.
  */
-export async function sendMessage(channel: string, text: string, botToken: string, threadTs?: string): Promise<string> {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function sendMessage(
+  channel: string,
+  text: string,
+  botToken: string,
+  threadTs?: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  blocks?: any[]
+): Promise<string> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const payload: any = {
     channel,
     text,
@@ -74,6 +83,9 @@ export async function sendMessage(channel: string, text: string, botToken: strin
 
   if (threadTs) {
     payload.thread_ts = threadTs;
+  }
+  if (blocks && blocks.length > 0) {
+    payload.blocks = blocks;
   }
 
   try {
@@ -92,6 +104,36 @@ export async function sendMessage(channel: string, text: string, botToken: strin
   } catch (error: any) {
     console.error('Slack sendMessage error:', error.response?.data || error.message);
     throw new Error(`Failed to send message to Slack: ${error.message}`);
+  }
+}
+
+/**
+ * Send a Block-Kit message into a channel/thread. Used by session_gc to
+ * post the "Submit your feedback" prompt when a session idle-expires.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function sendBlocksMessage(
+  channel: string,
+  text: string,
+  blocks: any[],
+  botToken: string,
+  threadTs?: string
+): Promise<string> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const payload: any = { blocks, channel, text };
+  if (threadTs) payload.thread_ts = threadTs;
+
+  try {
+    const response = await axios.post<SlackMessageResponse>(`${SLACK_API_BASE}/chat.postMessage`, payload, {
+      headers: { Authorization: `Bearer ${botToken}`, 'Content-Type': 'application/json' },
+    });
+    if (!response.data.ok) {
+      throw new Error(`Slack API error: ${response.data.error}`);
+    }
+    return response.data.ts ?? '';
+  } catch (error: any) {
+    console.error('Slack sendBlocksMessage error:', error.response?.data || error.message);
+    throw new Error(`Failed to send blocks message to Slack: ${error.message}`);
   }
 }
 
@@ -183,22 +225,30 @@ export async function updateView(viewId: string, view: any, botToken: string): P
  * @param text The new message text.
  * @param botToken The Slack bot token.
  */
-export async function updateMessage(channel: string, ts: string, text: string, botToken: string): Promise<void> {
+export async function updateMessage(
+  channel: string,
+  ts: string,
+  text: string,
+  botToken: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  blocks?: any[]
+): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const payload: any = {
+    channel,
+    text,
+    ts,
+  };
+  if (blocks && blocks.length > 0) {
+    payload.blocks = blocks;
+  }
   try {
-    const response = await axios.post<SlackMessageResponse>(
-      `${SLACK_API_BASE}/chat.update`,
-      {
-        channel,
-        text,
-        ts,
+    const response = await axios.post<SlackMessageResponse>(`${SLACK_API_BASE}/chat.update`, payload, {
+      headers: {
+        Authorization: `Bearer ${botToken}`,
+        'Content-Type': 'application/json',
       },
-      {
-        headers: {
-          Authorization: `Bearer ${botToken}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
+    });
 
     if (!response.data.ok) {
       throw new Error(`Slack API error: ${response.data.error}`);

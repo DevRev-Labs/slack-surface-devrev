@@ -35,6 +35,11 @@ export const SESSION_FIELD = {
 
   expiresAtMs: `${TNT}expires_at_ms`,
 
+  // Slack ts of the "Submit your feedback" prompt posted by session_gc
+  // when the session idle-expires. Stored so the GC's later hard-expiry
+  // sweep can delete that prompt before the conversation goes away.
+  feedbackPromptTs: `${TNT}feedback_prompt_ts`,
+
   // User feedback (1-5 rating + free-text comment) collected via the
   // Slack feedback form. Written when the user submits; stays empty
   // otherwise. One value per session — submitting again overwrites.
@@ -134,6 +139,7 @@ export const SESSION_FIELD_SPECS: FieldSpec[] = [
   { field_type: 'text', name: stripTnt(SESSION_FIELD.feedbackText) },
   { field_type: 'timestamp', name: stripTnt(SESSION_FIELD.feedbackSubmittedAtMs) },
   { field_type: 'int', name: stripTnt(SESSION_FIELD.lastDeliveredTurn) },
+  { field_type: 'text', name: stripTnt(SESSION_FIELD.feedbackPromptTs) },
 ];
 
 export type SchemaFieldSpec = FieldSpec;

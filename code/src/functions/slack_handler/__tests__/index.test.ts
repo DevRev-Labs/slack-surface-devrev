@@ -52,6 +52,7 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     devrevUserId: 'dev-user-123',
     endReason: '',
     expiresAt: Date.now() + 60_000,
+    feedbackPromptTs: '',
     feedbackRating: 0,
     feedbackSubmittedAt: 0,
     feedbackText: '',

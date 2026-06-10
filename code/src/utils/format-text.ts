@@ -281,6 +281,197 @@ function convertTableToText(text: string): string {
   return result.join('\n');
 }
 
+// Slack limits: a section block's text is capped at 3000 chars, a header
+// block's plain_text at 150 chars, and a single message may carry at most
+// 50 blocks.
+const SECTION_TEXT_LIMIT = 3000;
+const HEADER_TEXT_LIMIT = 150;
+const MAX_BLOCKS = 50;
+
+const RAW_HEADING_RE = /^\s*#{1,6}\s+(.+?)\s*#*$/;
+const HORIZONTAL_RULE_RE = /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/;
+
+/**
+ * Same DON-resolution + table-flattening pipeline as
+ * `formatAgentResponseForSlack`, but leaves raw `# Heading` lines intact
+ * so the block builder can promote them to dedicated `header` blocks.
+ * Standard inline markdown (bold, strike, links, bullets) is still
+ * translated to Slack mrkdwn — only the heading conversion is suppressed.
+ */
+function formatPreservingHeadings(text: string | undefined | null): string {
+  if (!text) return '';
+  let body = text;
+
+  body = body.replace(MD_LINK_TO_DON, (_match, label: string) => resolveLinkLabel(label));
+  body = body.replace(HTML_ANCHOR_TO_DON, (_match, _href: string, label: string) => resolveLinkLabel(label));
+  body = body.replace(new RegExp(String.raw`\[<(${DON_RAW})>\]`, 'gi'), (_match, donId: string) => {
+    return donToDisplayId(donId) ?? '';
+  });
+  body = body.replace(new RegExp(String.raw`\[(${DON_RAW})\]`, 'gi'), (_match, donId: string) => {
+    return donToDisplayId(donId) ?? '';
+  });
+  body = body.replace(new RegExp(String.raw`<(${DON_RAW})>`, 'gi'), (_match, donId: string) => {
+    return donToDisplayId(donId) ?? '';
+  });
+  body = body.replace(DON_REGEX, (donId: string) => donToDisplayId(donId) ?? '');
+
+  body = convertTableToText(body);
+
+  // Inline markdown → mrkdwn, EXCEPT heading conversion (preserved for
+  // block-level promotion to a `header` block).
+  body = body
+    .replace(/\*\*(.+?)\*\*/g, '*$1*')
+    .replace(/~~(.+?)~~/g, '~$1~')
+    .replace(/^\s*[-*]\s+/gm, '• ')
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<$2|$1>');
+
+  body = body.replace(/\(\s*\)/g, '');
+  body = body.replace(/\[\s*\]/g, '');
+  body = body.replace(/[ \t]+([.,;:!?])/g, '$1');
+  body = body.replace(/[ \t]{2,}/g, ' ');
+  body = body.replace(/[ \t]+\n/g, '\n');
+  body = body.trim();
+
+  return body;
+}
+
+/**
+ * Parse the agent's raw markdown into a Slack message body:
+ *   - `text`: a plain-text fallback (used by Slack for notifications and
+ *     screen readers)
+ *   - `blocks`: Block Kit blocks where `# Heading` becomes a `header`
+ *     block, `---` becomes a `divider`, and everything else is packed
+ *     into mrkdwn `section` blocks under per-block character limits.
+ *
+ * If the input has no headings or rules and fits in a single section, the
+ * caller can ignore `blocks` and just send `text`.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function parseAgentResponseToBlocks(rawText: string | undefined | null): { blocks: any[]; text: string } {
+  const formatted = formatPreservingHeadings(rawText);
+  const blocks = buildSlackBlocks(formatted);
+  // Strip raw `#` markers from the fallback so screen readers don't
+  // announce them as text.
+  const fallback = formatted.replace(/^\s*#{1,6}\s+/gm, '').substring(0, SECTION_TEXT_LIMIT) || 'New message';
+  return { blocks, text: fallback };
+}
+
+/**
+ * Convert formatted text into Block Kit blocks. `# Heading` lines become
+ * `header` blocks, `---` rules become `divider` blocks, the rest is
+ * packed into `section` blocks of mrkdwn text. The result is capped at
+ * MAX_BLOCKS with a truncation note if content was dropped.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function buildSlackBlocks(formatted: string): any[] {
+  const lines = formatted.split('\n');
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const blocks: any[] = [];
+  let buffer: string[] = [];
+
+  const flushBuffer = () => {
+    if (buffer.length === 0) return;
+    blocks.push(...packSectionBlocks(buffer.join('\n')));
+    buffer = [];
+  };
+
+  for (const line of lines) {
+    const heading = line.match(RAW_HEADING_RE);
+    if (heading) {
+      flushBuffer();
+      blocks.push({
+        text: { text: stripMarkers(heading[1]).substring(0, HEADER_TEXT_LIMIT), type: 'plain_text' },
+        type: 'header',
+      });
+      continue;
+    }
+
+    if (HORIZONTAL_RULE_RE.test(line)) {
+      flushBuffer();
+      blocks.push({ type: 'divider' });
+      continue;
+    }
+
+    buffer.push(line);
+  }
+  flushBuffer();
+
+  if (blocks.length > MAX_BLOCKS) {
+    const truncated = blocks.slice(0, MAX_BLOCKS - 1);
+    truncated.push({
+      text: { text: '_Response truncated._', type: 'mrkdwn' },
+      type: 'section',
+    });
+    return truncated;
+  }
+
+  return blocks;
+}
+
+/**
+ * Pack a block of mrkdwn text into section blocks. Paragraphs (blank-line
+ * separated) are greedily combined into chunks under the per-section text
+ * limit; a paragraph longer than the limit is hard-split on newline
+ * boundaries.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function packSectionBlocks(text: string): any[] {
+  const paragraphs = text
+    .split(/\n{2,}/)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+
+  const chunks: string[] = [];
+  let current = '';
+
+  const pushCurrent = () => {
+    if (current) {
+      chunks.push(current);
+      current = '';
+    }
+  };
+
+  for (const paragraph of paragraphs) {
+    const pieces = paragraph.length > SECTION_TEXT_LIMIT ? hardSplit(paragraph) : [paragraph];
+
+    for (const piece of pieces) {
+      if (!current) {
+        current = piece;
+      } else if (current.length + 2 + piece.length <= SECTION_TEXT_LIMIT) {
+        current += `\n\n${piece}`;
+      } else {
+        pushCurrent();
+        current = piece;
+      }
+    }
+  }
+  pushCurrent();
+
+  return chunks.map((chunk) => ({
+    text: { text: chunk, type: 'mrkdwn' },
+    type: 'section',
+  }));
+}
+
+function stripMarkers(text: string): string {
+  return text.replace(/[*_~`]/g, '').trim();
+}
+
+function hardSplit(text: string): string[] {
+  const pieces: string[] = [];
+  let remaining = text;
+
+  while (remaining.length > SECTION_TEXT_LIMIT) {
+    let cut = remaining.lastIndexOf('\n', SECTION_TEXT_LIMIT);
+    if (cut <= 0) cut = SECTION_TEXT_LIMIT;
+    pieces.push(remaining.substring(0, cut).trim());
+    remaining = remaining.substring(cut).trim();
+  }
+  if (remaining) pieces.push(remaining);
+
+  return pieces;
+}
+
 /**
  * Iteratively strip HTML tags. A single-pass `replace(/<[^>]+>/g, '')` is
  * defeated by overlapping inputs like `<scr<script>ipt>` — after one pass

@@ -25,6 +25,12 @@ export const FEEDBACK_ACTION_TEXT = 'comment';
 // dispatcher can reject other commands cleanly.
 export const FEEDBACK_SLASH_COMMAND = '/sda-feedback';
 
+// action_id of the "Submit your feedback" button posted by session_gc
+// when a session idle-expires. Click delivers a block_actions payload
+// with a fresh trigger_id; slack_interactivity opens the modal pre-bound
+// to the ended session id (carried via the button's `value`).
+export const ACTION_OPEN_FEEDBACK_FROM_PROMPT = 'feedback_open_from_prompt';
+
 export interface FeedbackContext {
   /**
    * The active session id at modal-open time. May be empty when the
@@ -191,6 +197,44 @@ export function buildFeedbackConfirmationBlocks(rating: number, _comment: string
     },
   ];
 }
+
+/**
+ * Block-Kit message posted by session_gc when a session idle-expires.
+ * Carries a "Submit your feedback" button whose value is the ended
+ * session's FeedbackContext, so the click handler can open the modal
+ * pre-bound to that session (no active-session lookup needed).
+ *
+ * The same prompt is deleted on hard-expiry so it doesn't outlive the
+ * underlying conversation.
+ */
+export function buildFeedbackPromptBlocks(ctx: FeedbackContext): SlackBlock[] {
+  return [
+    {
+      text: {
+        text:
+          '*Your conversation with the SDA Agent has ended.*\n' +
+          'Take a moment to share how it went — your feedback helps us improve.',
+        type: 'mrkdwn',
+      },
+      type: 'section',
+    },
+    {
+      block_id: 'feedback_prompt_actions',
+      elements: [
+        {
+          action_id: ACTION_OPEN_FEEDBACK_FROM_PROMPT,
+          style: 'primary',
+          text: { text: '📝 Submit your feedback', type: 'plain_text' },
+          type: 'button',
+          value: encodeContext(ctx),
+        },
+      ],
+      type: 'actions',
+    },
+  ];
+}
+
+export const FEEDBACK_PROMPT_FALLBACK_TEXT = 'Submit feedback on the SDA Agent.';
 
 export function feedbackConfirmationFallbackText(rating: number): string {
   return `Feedback recorded — ${rating}/5 rating saved.`;
