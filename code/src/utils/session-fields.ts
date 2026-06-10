@@ -35,6 +35,11 @@ export const SESSION_FIELD = {
 
   expiresAtMs: `${TNT}expires_at_ms`,
 
+  // Slack ts of the "Submit your feedback" prompt posted by session_gc
+  // when the session idle-expires. Stored so the GC's later hard-expiry
+  // sweep can delete that prompt before the conversation goes away.
+  feedbackPromptTs: `${TNT}feedback_prompt_ts`,
+
   // User feedback (1-5 rating + free-text comment) collected via the
   // Slack feedback form. Written when the user submits; stays empty
   // otherwise. One value per session — submitting again overwrites.
@@ -53,11 +58,6 @@ export const SESSION_FIELD = {
   // ai_response_handler to drop duplicate `message` events and late
   // `progress` events emitted by the AI Agent for the same turn.
   lastDeliveredTurn: `${TNT}last_delivered_turn`,
-
-  // Slack ts of the "Submit your feedback" prompt posted by session_gc
-  // when the session idle-expires. Stored so the GC's later hard-expiry
-  // sweep can delete that prompt before the conversation goes away.
-  feedbackPromptTs: `${TNT}feedback_prompt_ts`,
 
   lastUsedAtMs: `${TNT}last_used_at_ms`,
 

@@ -20,12 +20,12 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     devrevUserId: '',
     endReason: '',
     expiresAt: 0,
+    feedbackPromptTs: '',
     feedbackRating: 0,
     feedbackSubmittedAt: 0,
     feedbackText: '',
     generation: 0,
     hardExpiresAt: 0,
-    feedbackPromptTs: '',
     lastDeliveredTurn: 0,
     lastUsedAt: 0,
     messageCount: 0,
@@ -74,7 +74,11 @@ describe('session_gc', () => {
     mockedSessionStore.listHardExpiredSessions.mockResolvedValue([]);
     // endSession echoes the record back so the GC has access to its
     // freshly-updated fields when deciding to post a feedback prompt.
-    mockedSessionStore.endSession.mockImplementation(async (_c, r) => ({ ...r, status: 'expired', endReason: 'idle_timeout' }));
+    mockedSessionStore.endSession.mockImplementation(async (_c, r) => ({
+      ...r,
+      endReason: 'idle_timeout',
+      status: 'expired',
+    }));
     mockedSessionStore.deleteSession.mockResolvedValue(undefined);
     mockedSessionStore.patchSession.mockImplementation(async (_c, r) => r);
     mockedSlackClient.sendBlocksMessage.mockResolvedValue('prompt-ts-1');

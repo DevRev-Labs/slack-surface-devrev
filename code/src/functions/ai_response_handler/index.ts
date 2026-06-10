@@ -10,7 +10,7 @@
 
 import { FunctionInput } from '../../types';
 import { ConversationReference } from '../../utils/conversation-store';
-import { formatAgentResponseForSlack } from '../../utils/format-text';
+import { parseAgentResponseToBlocks } from '../../utils/format-text';
 import { readSessionTimingConfig } from '../../utils/session-config';
 import {
   getSessionByConversationId,
@@ -202,7 +202,11 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
     return { reason: 'Duplicate event for delivered turn', status: 'ignored' };
   }
 
-  // Handle progress events — update the temp message
+  // Handle progress events — show ONLY the agent's reasoning ("thought").
+  // Skill names, skill inputs, and result summaries are intentionally
+  // suppressed; they leak internal tool names and add noise. Events that
+  // carry no thought (e.g. skill_executed summaries with only a result)
+  // don't touch the placeholder at all.
   if (agentResponseType === 'progress') {
     const progress = payload.ai_agent_response?.progress || payload.progress;
     console.log(
@@ -211,7 +215,12 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
       )}`
     );
     if (progress) {
-      const progressMessage = getProgressMessage(progress);
+      const thought = extractThought(progress);
+      if (!thought) {
+        console.log(`[${requestId}] [AI_RESP] Progress event has no thought, skipping`);
+        return { message: 'Progress event without thought ignored', status: 'ignored' };
+      }
+      const progressMessage = `🤔 ${thought}`;
 
       // Re-fetch the latest session row so a tempMessageTs that
       // slack_handler wrote *after* this handler's snapshot is
@@ -229,9 +238,7 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
             );
           }
         } catch (refetchErr: any) {
-          console.warn(
-            `[${requestId}] [AI_RESP] progress re-fetch failed: ${refetchErr?.message || refetchErr}`
-          );
+          console.warn(`[${requestId}] [AI_RESP] progress re-fetch failed: ${refetchErr?.message || refetchErr}`);
         }
       }
 
@@ -353,11 +360,12 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
   );
 
   try {
-    const formattedResponse = formatAgentResponseForSlack(responseText);
+    const { blocks, text: fallbackText } = parseAgentResponseToBlocks(responseText);
+    const blocksForSlack = blocks.length > 0 ? blocks : undefined;
     console.log(
       `[${requestId}] [AI_RESP] Response from agent: "${responseText.substring(0, 200)}${
         responseText.length > 200 ? '...' : ''
-      }"`
+      }"${blocksForSlack ? ` (${blocksForSlack.length} blocks)` : ''}`
     );
 
     if (conversationRef.tempMessageTs) {
@@ -367,12 +375,11 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
         await updateMessage(
           conversationRef.channel,
           conversationRef.tempMessageTs,
-          formattedResponse,
-          slackBotToken
+          fallbackText,
+          slackBotToken,
+          blocksForSlack
         );
-        console.log(
-          `[${requestId}] [AI_RESP] Final response replaced placeholder ts=${conversationRef.tempMessageTs}`
-        );
+        console.log(`[${requestId}] [AI_RESP] Final response replaced placeholder ts=${conversationRef.tempMessageTs}`);
       } catch (updateErr: any) {
         // Placeholder is gone or stale — fall through to sendMessage so the
         // user still sees the reply. Try a best-effort cleanup of the
@@ -383,7 +390,7 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
         await deleteMessage(conversationRef.channel, conversationRef.tempMessageTs, slackBotToken).catch(
           () => undefined
         );
-        await sendMessage(conversationRef.channel, formattedResponse, slackBotToken, threadTs);
+        await sendMessage(conversationRef.channel, fallbackText, slackBotToken, threadTs, blocksForSlack);
       }
       sessionRecord = await safePatch(
         storeConfig,
@@ -394,7 +401,7 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
       );
       conversationRef.tempMessageTs = undefined;
     } else {
-      await sendMessage(conversationRef.channel, formattedResponse, slackBotToken, threadTs);
+      await sendMessage(conversationRef.channel, fallbackText, slackBotToken, threadTs, blocksForSlack);
     }
 
     console.log(
@@ -433,109 +440,23 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
   }
 }
 
+// Max characters kept per individual thought before truncation.
+const THOUGHT_MAX_LENGTH = 250;
+
 /**
- * Generate a progress message from an AI Agent progress object.
+ * Pull the AI Agent's reasoning ("thought") out of a progress object.
+ * Returns null for events that carry no thought (e.g. skill_executed
+ * result summaries) so the caller skips them entirely — the user only
+ * sees genuine reasoning, not internal skill names or tool inputs.
  */
-function getProgressMessage(progress: any): string {
-  if (!progress) return '⏳ _Working..._';
-
-  const state = progress.progress_state;
-  const skillTriggered = progress.skill_triggered;
-  const skillExecuted = progress.skill_executed;
-  const skill = skillTriggered?.skill_name || skillExecuted?.skill_name;
-
-  const thought = skillTriggered?.thought || skillExecuted?.thought || progress.thought;
-  const skillInput = skillTriggered?.skill_input || skillExecuted?.skill_input;
-
-  let message = '';
-
-  switch (state) {
-    case 'skill_triggered':
-      message = `🔍 *Analyzing: ${formatSkillName(skill) || 'data'}*`;
-      if (thought) {
-        message += `\n> _${truncateText(thought, 200)}_`;
-      }
-      if (skillInput && typeof skillInput === 'object') {
-        const inputPreview = formatSkillInput(skillInput);
-        if (inputPreview) {
-          message += `\n\`${inputPreview}\``;
-        }
-      }
-      break;
-
-    case 'skill_executed':
-      message = `⚡ *Processing: ${formatSkillName(skill) || 'results'}*`;
-      const resultSummary = skillExecuted?.result_summary || skillExecuted?.skill_output_summary;
-      if (resultSummary) {
-        message += `\n> _${truncateText(resultSummary, 150)}_`;
-      }
-      break;
-
-    case 'thinking':
-    case 'reasoning':
-      message = `🤔 *Thinking...*`;
-      if (thought) {
-        message += `\n> _${truncateText(thought, 250)}_`;
-      }
-      break;
-
-    case 'evaluating':
-      message = `📝 *Preparing response...*`;
-      break;
-
-    default:
-      message = `⏳ _Processing request..._`;
-      if (thought) {
-        message += `\n> _${truncateText(thought, 200)}_`;
-      }
-  }
-
-  return message;
-}
-
-function formatSkillName(skillName: string | undefined): string {
-  if (!skillName) return '';
-  return skillName
-    .replace(/[_-]/g, ' ')
-    .split(' ')
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-    .join(' ');
-}
-
-function truncateText(text: string, maxLength: number): string {
-  if (!text) return '';
-  const cleaned = text.replace(/\n/g, ' ').trim();
-  if (cleaned.length <= maxLength) return cleaned;
-  return cleaned.substring(0, maxLength - 3) + '...';
-}
-
-function formatSkillInput(input: any): string {
-  if (!input) return '';
-
-  if (input.query) {
-    return `Query: ${truncateText(input.query, 100)}`;
-  }
-  if (input.search_query) {
-    return `Search: ${truncateText(input.search_query, 100)}`;
-  }
-  if (input.sql || input.sql_query) {
-    return `SQL: ${truncateText(input.sql || input.sql_query, 100)}`;
-  }
-  if (input.question) {
-    return `Question: ${truncateText(input.question, 100)}`;
-  }
-
-  const keys = Object.keys(input);
-  if (keys.length > 0) {
-    const firstKey = keys[0];
-    const value =
-      typeof input[firstKey] === 'string'
-        ? truncateText(input[firstKey], 80)
-        : JSON.stringify(input[firstKey]).substring(0, 80);
-    return `${firstKey}: ${value}`;
-  }
-
-  return '';
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function extractThought(progress: any): string | null {
+  if (!progress) return null;
+  const thought = progress.skill_triggered?.thought || progress.skill_executed?.thought || progress.thought;
+  if (!thought || typeof thought !== 'string') return null;
+  const cleaned = thought.replace(/\n/g, ' ').trim();
+  if (!cleaned) return null;
+  return cleaned.length <= THOUGHT_MAX_LENGTH ? cleaned : cleaned.substring(0, THOUGHT_MAX_LENGTH - 3) + '...';
 }
 
 /**

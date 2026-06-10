@@ -455,7 +455,9 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
           await updateMessage(conversationRef.channel, placeholderTs, errorText, config.slackBotToken);
         } catch (updateErr: any) {
           console.warn(
-            `[${requestId}] [AI] failed to overwrite placeholder with error (${updateErr?.message || updateErr}); sending fresh message`
+            `[${requestId}] [AI] failed to overwrite placeholder with error (${
+              updateErr?.message || updateErr
+            }); sending fresh message`
           );
           await sendMessage(conversationRef.channel, errorText, config.slackBotToken, threadTs).catch(() => {
             /* swallow */

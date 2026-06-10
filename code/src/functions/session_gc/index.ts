@@ -13,12 +13,9 @@
  * so the function does not self-schedule.
  */
 
+/* eslint-disable simple-import-sort/imports */
 import { FunctionInput } from '../../types';
-import {
-  buildFeedbackPromptBlocks,
-  FEEDBACK_PROMPT_FALLBACK_TEXT,
-  FeedbackContext,
-} from '../../utils/feedback';
+import { buildFeedbackPromptBlocks, FeedbackContext, FEEDBACK_PROMPT_FALLBACK_TEXT } from '../../utils/feedback';
 import {
   deleteSession,
   endSession,
@@ -29,6 +26,7 @@ import {
   StoreConfig,
 } from '../../utils/session-store';
 import { deleteMessage, sendBlocksMessage } from '../../utils/slack-client';
+/* eslint-enable simple-import-sort/imports */
 
 async function runGc(event: FunctionInput): Promise<any> {
   const requestId = event.execution_metadata.request_id;
@@ -87,12 +85,7 @@ async function runGc(event: FunctionInput): Promise<any> {
       //  - session has no channel routing info
       //  - feedback was already submitted on this session
       //  - a prompt already exists (re-running GC shouldn't post twice)
-      if (
-        slackBotToken &&
-        ended.channel &&
-        !ended.feedbackRating &&
-        !ended.feedbackPromptTs
-      ) {
+      if (slackBotToken && ended.channel && !ended.feedbackRating && !ended.feedbackPromptTs) {
         const ctx: FeedbackContext = {
           channel: ended.channel,
           sessionId: ended.sessionId,

@@ -24,12 +24,12 @@ function makeRecord(overrides: Partial<SessionRecord> = {}): SessionRecord {
     devrevUserId: 'dev-user-123',
     endReason: '',
     expiresAt: Date.now() + 60_000,
+    feedbackPromptTs: '',
     feedbackRating: 0,
     feedbackSubmittedAt: 0,
     feedbackText: '',
     generation: 0,
     hardExpiresAt: Date.now() + 24 * 60 * 60 * 1000,
-    feedbackPromptTs: '',
     lastDeliveredTurn: 0,
     lastUsedAt: Date.now(),
     messageCount: 1,
@@ -163,7 +163,8 @@ describe('ai_response_handler', () => {
       'C0123456789',
       'AI response content',
       'xoxb-test-token',
-      '1705315800.000100'
+      '1705315800.000100',
+      expect.any(Array)
     );
     expect(result).toEqual({
       message: 'AI response sent to Slack',
@@ -172,7 +173,7 @@ describe('ai_response_handler', () => {
     });
   });
 
-  test('updates temp message on progress events', async () => {
+  test('progress event renders only the agent thought (no skill names or inputs)', async () => {
     mockedSessionStore.getSessionById.mockResolvedValue(makeRecord({ tempMessageTs: '1705315801.000200' }));
     const progressEvent = {
       ...mockEvent,
@@ -182,22 +183,49 @@ describe('ai_response_handler', () => {
           agent_response: 'progress',
           progress: {
             progress_state: 'skill_triggered',
-            skill_triggered: { skill_name: 'hybrid_search' },
+            skill_triggered: {
+              skill_input: { query: 'list tickets' },
+              skill_name: 'hybrid_search',
+              thought: 'Looking up the open tickets for this org.',
+            },
           },
         },
       },
     };
 
     await run([progressEvent]);
-    expect(mockedSlackClient.updateMessage).toHaveBeenCalledWith(
-      'C0123456789',
-      '1705315801.000200',
-      expect.stringContaining('Hybrid Search'),
-      'xoxb-test-token'
-    );
+    const updateCall = mockedSlackClient.updateMessage.mock.calls[0];
+    expect(updateCall[0]).toBe('C0123456789');
+    expect(updateCall[1]).toBe('1705315801.000200');
+    const rendered = updateCall[2];
+    expect(rendered).toContain('Looking up the open tickets');
+    expect(rendered).not.toMatch(/hybrid_search|Hybrid Search/i);
+    expect(rendered).not.toContain('list tickets');
   });
 
-  test('sends new progress message and patches session when no temp message present', async () => {
+  test('progress event with no thought is skipped (no Slack call)', async () => {
+    mockedSessionStore.getSessionById.mockResolvedValue(makeRecord({ tempMessageTs: '1705315801.000200' }));
+    const progressEvent = {
+      ...mockEvent,
+      payload: {
+        ...mockEvent.payload,
+        ai_agent_response: {
+          agent_response: 'progress',
+          progress: {
+            progress_state: 'skill_executed',
+            skill_executed: { result_summary: 'Found 9 tickets', skill_name: 'hybrid_search' },
+          },
+        },
+      },
+    };
+
+    const result = await run([progressEvent]);
+    expect(result.status).toBe('ignored');
+    expect(mockedSlackClient.updateMessage).not.toHaveBeenCalled();
+    expect(mockedSlackClient.sendMessage).not.toHaveBeenCalled();
+  });
+
+  test('first progress event with a thought posts a new placeholder when none exists', async () => {
     const progressEvent = {
       ...mockEvent,
       payload: {
@@ -206,7 +234,7 @@ describe('ai_response_handler', () => {
           agent_response: 'progress',
           progress: {
             progress_state: 'skill_triggered',
-            skill_triggered: { skill_name: 'HybridSearch' },
+            skill_triggered: { thought: 'Routing the request.' },
           },
         },
       },
@@ -253,7 +281,8 @@ describe('ai_response_handler', () => {
       'C0123456789',
       '1705315801.000200',
       'AI response content',
-      'xoxb-test-token'
+      'xoxb-test-token',
+      expect.any(Array)
     );
     // Session's tempMessageTs cleared after the swap.
     expect(mockedSessionStore.patchSession).toHaveBeenCalledWith(
@@ -295,7 +324,8 @@ describe('ai_response_handler', () => {
       'C-FALLBACK',
       expect.any(String),
       'xoxb-test-token',
-      't-fallback'
+      't-fallback',
+      expect.any(Array)
     );
   });
 
