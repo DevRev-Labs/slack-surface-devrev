@@ -220,7 +220,11 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
         console.log(`[${requestId}] [AI_RESP] Progress event has no thought, skipping`);
         return { message: 'Progress event without thought ignored', status: 'ignored' };
       }
-      const progressMessage = `🤔 ${thought}`;
+      // Keep the hourglass that slack_handler used for the initial
+      // "⏳ Searching..." placeholder so the visual cue is consistent
+      // across all in-flight states. The italic wrap renders as muted
+      // grey text in Slack, which reads well next to the spinner.
+      const progressMessage = `⏳ _${thought}_`;
 
       // Re-fetch the latest session row so a tempMessageTs that
       // slack_handler wrote *after* this handler's snapshot is
