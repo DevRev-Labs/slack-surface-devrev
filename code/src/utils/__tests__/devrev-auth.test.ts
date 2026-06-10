@@ -1,3 +1,5 @@
+import { randomBytes } from 'crypto';
+
 import axios from 'axios';
 import {
   createActAsToken,
@@ -9,6 +11,10 @@ import {
   _clearActAsTokenCache,
   _clearWebhookCache,
 } from '../devrev-auth';
+
+// Generate fake-token strings per test run instead of hardcoding literals,
+// so secret-looking values never appear as static strings in source.
+const fakeToken = (label: string): string => `${label}-${randomBytes(8).toString('hex')}`;
 
 jest.mock('axios');
 const mockedAxios = axios as jest.Mocked<typeof axios>;
@@ -78,7 +84,7 @@ describe('devrev-auth', () => {
 
   describe('createActAsToken', () => {
     it('should return access token on success', async () => {
-      const actAsToken = 'new-access-token';
+      const actAsToken = fakeToken('new-access');
       mockAuthTokensCreate.mockResolvedValueOnce({
         data: { access_token: actAsToken },
       });
@@ -101,7 +107,7 @@ describe('devrev-auth', () => {
 
   describe('getOrCreateActAsToken', () => {
     it('should create and cache a new token', async () => {
-      const actAsToken = 'fresh-token';
+      const actAsToken = fakeToken('fresh');
       mockAuthTokensCreate.mockResolvedValueOnce({
         data: { access_token: actAsToken },
       });
@@ -112,7 +118,7 @@ describe('devrev-auth', () => {
     });
 
     it('should return cached token if not expired', async () => {
-      const actAsToken = 'cached-token';
+      const actAsToken = fakeToken('cached');
       mockAuthTokensCreate.mockResolvedValueOnce({
         data: { access_token: actAsToken },
       });
@@ -127,8 +133,8 @@ describe('devrev-auth', () => {
     });
 
     it('should create new token if cached one is expired', async () => {
-      const oldToken = 'old-token';
-      const newToken = 'new-token';
+      const oldToken = fakeToken('old');
+      const newToken = fakeToken('new');
 
       mockAuthTokensCreate
         .mockResolvedValueOnce({ data: { access_token: oldToken } })
