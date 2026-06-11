@@ -57,38 +57,67 @@ async function ensureSessionStateSchema(event: FunctionInput): Promise<any> {
   let hadError = false;
 
   for (const spec of SCHEMAS) {
-    const payload: CustomSchemaFragmentsSetRequest = {
+    const log = createLogger(requestId, LOG_TAG.CONFIG);
+
+    const buildPayload = (deletedFields?: string[]): CustomSchemaFragmentsSetRequest => ({
       description: spec.description,
       fields: spec.fields.map(toSchemaFieldDescriptor),
       is_custom_leaf_type: false,
       leaf_type: spec.leaf_type,
       type: CustomSchemaFragmentsSetRequestType.TenantFragment,
+      ...(deletedFields && deletedFields.length > 0 ? { deleted_fields: deletedFields } : {}),
+    });
+
+    // Extract the required deleted_fields list from a schema registry error message.
+    // Error format: `"deleted_fields": ["field1", "field2", ...]`
+    const parseDeletedFields = (message: string): string[] | null => {
+      const match = message.match(/"deleted_fields"\s*:\s*\[([^\]]*)\]/);
+      if (!match) return null;
+      return match[1].match(/"([^"]+)"/g)?.map((s) => s.replace(/"/g, '')) ?? null;
     };
 
-    const log = createLogger(requestId, LOG_TAG.CONFIG);
     try {
-      const response = await devrevSdk.customSchemaFragmentsSet(payload);
-      log.info('Ensured schema', {
+      const response = await devrevSdk.customSchemaFragmentsSet(buildPayload());
+      log.info('Ensured schema', { leaf_type: spec.leaf_type, schema_id: response.data?.id || '' });
+      results.push({ leaf_type: spec.leaf_type, schema_id: response.data?.id, status: 'success' });
+    } catch (firstError: any) {
+      const errorMessage: string = firstError?.response?.data?.message || firstError?.message || '';
+      const deletedFields = parseDeletedFields(errorMessage);
+
+      if (!deletedFields) {
+        hadError = true;
+        log.error('Failed to ensure schema', {
+          err_data: firstError?.response?.data,
+          err_message: errorMessage,
+          leaf_type: spec.leaf_type,
+        });
+        results.push({ error: errorMessage || 'Unknown error', leaf_type: spec.leaf_type, status: 'error' });
+        continue;
+      }
+
+      // Retry with the deleted_fields list extracted from the error.
+      log.info('Retrying schema set with deleted_fields confirmation', {
+        deleted_fields: deletedFields,
         leaf_type: spec.leaf_type,
-        schema_id: response.data?.id || '',
       });
-      results.push({
-        leaf_type: spec.leaf_type,
-        schema_id: response.data?.id,
-        status: 'success',
-      });
-    } catch (error: any) {
-      hadError = true;
-      log.error('Failed to ensure schema', {
-        err_data: error?.response?.data,
-        err_message: error?.message || error,
-        leaf_type: spec.leaf_type,
-      });
-      results.push({
-        error: error?.message || 'Unknown error',
-        leaf_type: spec.leaf_type,
-        status: 'error',
-      });
+      try {
+        const response = await devrevSdk.customSchemaFragmentsSet(buildPayload(deletedFields));
+        log.info('Ensured schema (with deleted_fields)', {
+          deleted_fields: deletedFields,
+          leaf_type: spec.leaf_type,
+          schema_id: response.data?.id || '',
+        });
+        results.push({ leaf_type: spec.leaf_type, schema_id: response.data?.id, status: 'success' });
+      } catch (retryError: any) {
+        hadError = true;
+        const retryMessage: string = retryError?.response?.data?.message || retryError?.message || '';
+        log.error('Failed to ensure schema after deleted_fields retry', {
+          err_data: retryError?.response?.data,
+          err_message: retryMessage,
+          leaf_type: spec.leaf_type,
+        });
+        results.push({ error: retryMessage || 'Unknown error', leaf_type: spec.leaf_type, status: 'error' });
+      }
     }
   }
 
