@@ -7,6 +7,9 @@
 import { client, publicSDK } from '@devrev/typescript-sdk';
 import axios from 'axios';
 
+import { ACT_AS_TOKEN_CONFIG, WEBHOOK_CONFIG } from '../config/defaults';
+import { logger } from './logger';
+
 /**
  * Token Cache interface for act-as tokens.
  */
@@ -45,7 +48,11 @@ export function _clearWebhookCache(): void {
 export function invalidateWebhookCache(eventSourceId: string): void {
   const removed = webhookCache.delete(eventSourceId);
   if (removed) {
-    console.error(`[DevRev] Invalidated cached webhook for event source ${eventSourceId}`);
+    // The original implementation used console.error for visibility on
+    // stderr; preserving that behaviour via logger.warn (warn also routes
+    // to stderr) — invalidation only happens when the upstream webhook
+    // misbehaves so it is worth surfacing at the warn floor.
+    logger.warn('[DevRev] Invalidated cached webhook for event source', { eventSourceId });
   }
 }
 
@@ -64,10 +71,10 @@ export async function findUserByEmail(email: string, endpoint: string, token: st
     const user = response.data.dev_users?.[0];
     return user ? user.id : null;
   } catch (error: any) {
-    console.error(
-      `[DevRev Auth] Error looking up user by email ${email}:`,
-      JSON.stringify(error.response?.data || error.message, null, 2)
-    );
+    logger.error('[DevRev Auth] Error looking up user by email', {
+      detail: error.response?.data || error.message,
+      email,
+    });
     return null;
   }
 }
@@ -81,7 +88,7 @@ export async function findUserByEmail(email: string, endpoint: string, token: st
  * @returns The new access token.
  */
 export async function createActAsToken(userId: string, endpoint: string, serviceToken: string): Promise<string | null> {
-  console.log(`[DevRev Auth] Creating act-as token for userId: ${userId}`);
+  logger.info('[DevRev Auth] Creating act-as token', { userId });
   try {
     const sdk = client.setup({ endpoint, token: serviceToken });
     const response = await sdk.authTokensCreate({
@@ -90,13 +97,16 @@ export async function createActAsToken(userId: string, endpoint: string, service
       grant_type: publicSDK.AuthTokenGrantType.UrnDevrevParamsOauthGrantTypeTokenIssue,
       requested_token_type: publicSDK.AuthTokenRequestedTokenType.UrnDevrevParamsOauthTokenTypePatActAs,
     });
-    console.log(`[DevRev Auth] act-as token created successfully`);
+    logger.info('[DevRev Auth] act-as token created successfully', { userId });
     return response.data.access_token;
   } catch (error: any) {
-    console.error('[DevRev Auth] act-as token creation failed:');
-    console.error('  status:', error.response?.status);
-    console.error('  data:', JSON.stringify(error.response?.data, null, 2));
-    console.error('  message:', error.message);
+    // Single structured line keeps the failure correlatable; the original
+    // four-line format made grep / log-aggregator queries awkward.
+    logger.error('[DevRev Auth] act-as token creation failed', {
+      data: error.response?.data,
+      message: error.message,
+      status: error.response?.status,
+    });
     return null;
   }
 }
@@ -116,12 +126,15 @@ export async function getOrCreateActAsToken(
   userId: string,
   endpoint: string,
   serviceToken: string,
-  ttlMinutes = 30
+  ttlMinutes = ACT_AS_TOKEN_CONFIG.ttlMinutes
 ): Promise<string | null> {
   const cacheKey = `${userId}:${endpoint}`;
   const cached = actAsTokenCache.get(cacheKey);
 
-  if (cached && cached.expiresAt > Date.now() + 60000) {
+  // Treat the token as stale a fixed margin before its real expiry so callers
+  // never receive a token that's about to die mid-request. Margin is tunable
+  // via the ACT_AS_TOKEN_REFRESH_MARGIN_MS env var.
+  if (cached && cached.expiresAt > Date.now() + ACT_AS_TOKEN_CONFIG.refreshMarginMs) {
     return cached.token;
   }
 
@@ -167,7 +180,9 @@ export async function getWebhookStatus(webhookId: string, endpoint: string, toke
     });
     return response.data.webhook?.status || null;
   } catch (error: any) {
-    console.error('[DevRev] Error getting webhook status:', error.response?.data || error.message);
+    logger.error('[DevRev] Error getting webhook status', {
+      detail: error.response?.data || error.message,
+    });
     return null;
   }
 }
@@ -186,8 +201,8 @@ export async function waitForWebhookActive(
   webhookId: string,
   endpoint: string,
   token: string,
-  maxWaitMs = 10000,
-  pollIntervalMs = 500
+  maxWaitMs = WEBHOOK_CONFIG.maxWaitMs,
+  pollIntervalMs = WEBHOOK_CONFIG.pollIntervalMs
 ): Promise<boolean> {
   const startTime = Date.now();
 
@@ -195,19 +210,19 @@ export async function waitForWebhookActive(
     const status = await getWebhookStatus(webhookId, endpoint, token);
 
     if (status === 'active') {
-      console.log(`[DevRev] Webhook ${webhookId} is now active`);
+      logger.info('[DevRev] Webhook is now active', { webhookId });
       return true;
     }
 
     if (status === 'error' || status === 'disabled') {
-      console.error(`[DevRev] Webhook ${webhookId} has status: ${status}`);
+      logger.error('[DevRev] Webhook reached terminal non-active status', { status, webhookId });
       return false;
     }
 
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
   }
 
-  console.warn(`[DevRev] Timeout waiting for webhook ${webhookId} to become active`);
+  logger.warn('[DevRev] Timeout waiting for webhook to become active', { webhookId });
   return false;
 }
 
@@ -240,7 +255,7 @@ export async function createWebhook(url: string, endpoint: string, token: string
     const status = webhook?.status;
 
     if (!webhookId) {
-      console.error('[DevRev] No webhook ID in response');
+      logger.error('[DevRev] No webhook ID in response');
       return null;
     }
 
@@ -251,13 +266,15 @@ export async function createWebhook(url: string, endpoint: string, token: string
     const isActive = await waitForWebhookActive(webhookId, endpoint, token);
 
     if (!isActive) {
-      console.error(`[DevRev] Webhook ${webhookId} did not become active in time`);
+      logger.error('[DevRev] Webhook did not become active in time', { webhookId });
       return null;
     }
 
     return webhookId;
   } catch (error: any) {
-    console.error('[DevRev] Error creating webhook:', JSON.stringify(error.response?.data, null, 2) || error.message);
+    logger.error('[DevRev] Error creating webhook', {
+      detail: error.response?.data || error.message,
+    });
     return null;
   }
 }

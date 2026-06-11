@@ -77,7 +77,6 @@ async function run(f: any, event: any): Promise<any> {
 async function handleEvent(events: any[], isAsync: boolean, resp: Response) {
   let error;
   const results: ExecutionResult[] = [];
-  let receivedError = false;
 
   if (!Array.isArray(events)) {
     const errMsg = 'Invalid request format: body is not an array';
@@ -122,14 +121,12 @@ async function handleEvent(events: any[], isAsync: boolean, resp: Response) {
         err_type: RuntimeErrorType.FunctionNameNotProvided,
       } as RuntimeError;
       console.error(error.err_msg);
-      receivedError = true;
     } else if (!allowedFunctionNames.has(rawName)) {
       error = {
         err_msg: `Function ${rawName} not found in factory`,
         err_type: RuntimeErrorType.FunctionNotFound,
       } as RuntimeError;
       console.error(error.err_msg);
-      receivedError = true;
     } else {
       const functionName = rawName as FunctionFactoryType;
       const f = functionFactory[functionName];

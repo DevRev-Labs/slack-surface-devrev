@@ -1,9 +1,13 @@
 import path from 'path';
 import yargs from 'yargs';
+// yargs publishes /helpers via its package "exports" map, which the
+// import/no-unresolved rule (in eslint-plugin-import 2.32+) can't resolve.
+// eslint-disable-next-line import/no-unresolved
 import { hideBin } from 'yargs/helpers';
 
 import { functionFactory, FunctionFactoryType } from './function-factory';
 import { testRunner } from './test-runner/test-runner';
+import { logger } from './utils/logger';
 
 (async () => {
   const argv = await yargs(hideBin(process.argv)).options({
@@ -18,13 +22,16 @@ import { testRunner } from './test-runner/test-runner';
   }).argv;
 
   if (!argv.fixturePath || !argv.functionName) {
-    console.error('Please make sure you have passed fixturePath & functionName');
+    logger.error('Missing required CLI arguments: fixturePath and/or functionName');
     process.exit(1);
   }
 
   const allowedFunctionNames = Object.keys(functionFactory) as FunctionFactoryType[];
   if (!allowedFunctionNames.includes(argv.functionName as FunctionFactoryType)) {
-    console.error(`Invalid functionName: "${argv.functionName}". Allowed values: ${allowedFunctionNames.join(', ')}`);
+    logger.error('Invalid functionName', {
+      allowed: allowedFunctionNames.join(', '),
+      provided: argv.functionName,
+    });
     process.exit(1);
   }
 

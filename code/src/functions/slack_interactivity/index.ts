@@ -4,7 +4,7 @@
  * Two event shapes, both delivered to the same Slack interactivity
  * webhook with `application/x-www-form-urlencoded` bodies:
  *
- *   1. Slash command (`/sda-feedback`) — form fields: command,
+ *   1. Slash command (`/sda-agent-feedback`) — form fields: command,
  *      user_id, channel_id, trigger_id. Opens a Loading modal,
  *      resolves the active session, swaps in the real form.
  *
@@ -36,6 +36,7 @@ import {
   FEEDBACK_SLASH_COMMAND,
   FEEDBACK_VIEW_CALLBACK,
 } from '../../utils/feedback';
+import { logger } from '../../utils/logger';
 import { readSessionTimingConfig } from '../../utils/session-config';
 import {
   getLatestActiveSessionForUserInChannel,
@@ -46,16 +47,16 @@ import {
 } from '../../utils/session-store';
 import { deleteMessage, openView, postEphemeral, updateView } from '../../utils/slack-client';
 import { validateSlackSignature } from '../../utils/slack-signature-validator';
+import { errMsg } from '../../utils/errors';
+import {
+  bodyHasUsefulKey,
+  decodeBase64BodyRaw,
+  parseFormUrlEncoded,
+  tryPromotePayloadField,
+} from '../../utils/slack-form-body';
 /* eslint-enable simple-import-sort/imports */
 
 const FORBIDDEN_RESPONSE = { status: 'forbidden', status_code: 403 };
-
-/** Extract a string from `catch (e: unknown)` for log/return without `any`. */
-function errMsg(e: unknown): string {
-  if (e instanceof Error) return e.message;
-  if (typeof e === 'string') return e;
-  return String(e);
-}
 
 /**
  * Slash-command form payload (Rego forwards this verbatim under `body`
@@ -100,7 +101,7 @@ export const run = async (events: FunctionInput[]): Promise<any> => {
       try {
         return await handle(event);
       } catch (error: unknown) {
-        console.error(`[${event?.execution_metadata?.request_id ?? 'unknown'}] [interactivity] error:`, errMsg(error));
+        logger.error(`[${event?.execution_metadata?.request_id ?? 'unknown'}] [interactivity] error:`, errMsg(error));
         return { reason: errMsg(error) || 'Unknown error', status: 'error' };
       }
     })
@@ -129,7 +130,7 @@ async function handle(event: FunctionInput): Promise<any> {
   if (fastPathResult) return fastPathResult;
 
   // Visibility — log every invocation so we can confirm Slack reaches us.
-  console.log(
+  logger.info(
     `[${requestId}] [interactivity] received payload keys: ${
       payload && typeof payload === 'object' ? Object.keys(payload).join(',') : typeof payload
     }`
@@ -139,7 +140,7 @@ async function handle(event: FunctionInput): Promise<any> {
   // Slack form-encoded bodies sometimes arrive as parsed objects with the
   // form fields as keys (e.g. {command, trigger_id, user_id, …}); other
   // times as a string; other times empty with bytes only in body_raw.
-  console.log(
+  logger.info(
     `[${requestId}] [interactivity] body type=${typeof body} keys=${
       body && typeof body === 'object' ? Object.keys(body).slice(0, 20).join(',') : '∅'
     } body_raw_len=${bodyRaw ? bodyRaw.length : 0}`
@@ -147,67 +148,65 @@ async function handle(event: FunctionInput): Promise<any> {
   if (bodyRaw) {
     try {
       const decodedPreview = Buffer.from(bodyRaw, 'base64').toString('utf8').slice(0, 200);
-      console.log(`[${requestId}] [interactivity] body_raw preview: ${decodedPreview}`);
+      logger.info(`[${requestId}] [interactivity] body_raw preview: ${decodedPreview}`);
     } catch {}
   }
 
   // Slack delivers slash commands and Block-Kit interactivity as
   // `application/x-www-form-urlencoded`. The DevRev gateway forwards
   // those bodies in unpredictable shapes — parsed object, raw string,
-  // or even an empty object with the bytes in body_raw. Normalize.
-  const bodyHasUsefulKey = (b: any): boolean =>
-    !!b &&
-    typeof b === 'object' &&
-    (typeof b.type === 'string' || typeof b.command === 'string' || typeof b.payload === 'string');
+  // or even an empty object with the bytes in body_raw. Normalize via
+  // helpers in utils/slack-form-body.ts.
 
   if (typeof body === 'string') {
-    console.log(`[${requestId}] [interactivity] body is string (len=${body.length}) — parsing as form`);
+    logger.info(`[${requestId}] [interactivity] body is string (len=${body.length}) — parsing as form`);
     body = parseFormUrlEncoded(body);
   }
 
   // If body still doesn't have a discriminator field but body_raw is
-  // present, decode body_raw (base64) and parse as form. Slack form
-  // bodies always contain at least one '=' character.
+  // present, decode body_raw (base64) and parse as form.
   if (!bodyHasUsefulKey(body) && bodyRaw) {
-    try {
-      const decoded = Buffer.from(bodyRaw, 'base64').toString('utf8');
-      console.log(
+    const decoded = decodeBase64BodyRaw(bodyRaw);
+    if (decoded === null) {
+      logger.warn(`[${requestId}] [interactivity] body_raw is not valid base64`);
+    } else {
+      logger.info(
         `[${requestId}] [interactivity] body has no command/type/payload — parsing body_raw (decoded_len=${decoded.length})`
       );
       const parsed = parseFormUrlEncoded(decoded);
       if (Object.keys(parsed).length > 0) {
         body = parsed;
       }
-    } catch (err: unknown) {
-      console.warn(`[${requestId}] [interactivity] body_raw decode failed: ${errMsg(err)}`);
     }
   }
 
   // If the parsed form has a `payload` field (Block-Kit interactivity),
   // the value is URL-encoded JSON — promote it to the body.
-  if (body && typeof body === 'object' && typeof body.payload === 'string') {
-    try {
-      body = JSON.parse(body.payload);
-    } catch (err: unknown) {
-      console.warn(`[${requestId}] [interactivity] payload JSON parse failed: ${errMsg(err)}`);
-    }
+  const promoted = tryPromotePayloadField(body);
+  if (promoted !== null) {
+    body = promoted;
+  } else if (body && typeof body === 'object' && typeof (body as any).payload === 'string') {
+    // Field was present but JSON.parse failed. Fall back to string body so
+    // signature verification can still see the original payload, and warn so
+    // an operator notices the malformed Block-Kit response.
+    logger.warn(`[${requestId}] [interactivity] payload JSON parse failed — keeping form body`);
   }
 
   const signingSecret = event.input_data.keyrings?.['slack_signing_secret'];
   const sigCheck = validateSlackSignature(signingSecret, headers, body, bodyRaw);
   if (!sigCheck.valid) {
-    console.warn(`[${requestId}] [interactivity] signature rejected: ${sigCheck.reason}`);
+    logger.warn(`[${requestId}] [interactivity] signature rejected: ${sigCheck.reason}`);
     return FORBIDDEN_RESPONSE;
   }
 
   if (!body || typeof body !== 'object') {
-    console.warn(`[${requestId}] [interactivity] empty/invalid body after normalization`);
+    logger.warn(`[${requestId}] [interactivity] empty/invalid body after normalization`);
     return { reason: 'Empty interactivity payload', status: 'ignored' };
   }
 
   const slackBotToken = event.input_data.keyrings['slack_bot_token'];
   if (!slackBotToken) {
-    console.error(`[${requestId}] [interactivity] slack_bot_token missing`);
+    logger.error(`[${requestId}] [interactivity] slack_bot_token missing`);
     return { reason: 'Slack Bot Token not configured', status: 'error' };
   }
 
@@ -220,13 +219,13 @@ async function handle(event: FunctionInput): Promise<any> {
   // Slash command bodies have a `command` field; interactivity payloads
   // have a `type` field. Use the discriminator to dispatch.
   if (typeof (body as any).command === 'string') {
-    console.log(`[${requestId}] [interactivity] dispatch: slash command=${(body as any).command}`);
+    logger.info(`[${requestId}] [interactivity] dispatch: slash command=${(body as any).command}`);
     return handleSlashCommand(body as SlackSlashCommandPayload, slackBotToken, storeConfig, requestId);
   }
 
   const interactivity = body as SlackInteractivityPayload;
   const type = interactivity.type;
-  console.log(`[${requestId}] [interactivity] type=${type}`);
+  logger.info(`[${requestId}] [interactivity] type=${type}`);
 
   if (type === 'view_submission') {
     return handleViewSubmission(interactivity, slackBotToken, storeConfig, requestId);
@@ -264,11 +263,11 @@ async function handleBlockActions(
 
   const ctx = decodeContext(action.value);
   if (!ctx) {
-    console.warn(`[${requestId}] [block_actions] invalid context on feedback button`);
+    logger.warn(`[${requestId}] [block_actions] invalid context on feedback button`);
     return { reason: 'Invalid feedback prompt value', status: 'error' };
   }
   if (!payload.trigger_id) {
-    console.warn(`[${requestId}] [block_actions] missing trigger_id`);
+    logger.warn(`[${requestId}] [block_actions] missing trigger_id`);
     return { reason: 'Missing trigger_id', status: 'error' };
   }
 
@@ -278,9 +277,9 @@ async function handleBlockActions(
   let viewId: string;
   try {
     viewId = await openView(payload.trigger_id, buildLoadingModal(), slackBotToken);
-    console.log(`[${requestId}] [block_actions] loading modal opened view_id=${viewId}`);
+    logger.info(`[${requestId}] [block_actions] loading modal opened view_id=${viewId}`);
   } catch (error: unknown) {
-    console.error(`[${requestId}] [block_actions] views.open (loading) failed: ${errMsg(error)}`);
+    logger.error(`[${requestId}] [block_actions] views.open (loading) failed: ${errMsg(error)}`);
     return { details: errMsg(error), reason: 'views.open failed', status: 'error' };
   }
 
@@ -290,16 +289,16 @@ async function handleBlockActions(
 
   try {
     await updateView(viewId, buildFeedbackModal(ctx), slackBotToken);
-    console.log(`[${requestId}] [block_actions] real form rendered session=${ctx.sessionId}`);
+    logger.info(`[${requestId}] [block_actions] real form rendered session=${ctx.sessionId}`);
     return { mode: 'feedback_modal_opened', session_id: ctx.sessionId, status: 'success' };
   } catch (error: unknown) {
-    console.error(`[${requestId}] [block_actions] views.update failed: ${errMsg(error)}`);
+    logger.error(`[${requestId}] [block_actions] views.update failed: ${errMsg(error)}`);
     return { details: errMsg(error), reason: 'views.update failed', status: 'error' };
   }
 }
 
 /**
- * Handle `/sda-feedback`.
+ * Handle `/sda-agent-feedback`.
  *
  * Two-stage pattern (mirrors the marketplace Slack snap-in's create-ticket
  * flow):
@@ -314,7 +313,7 @@ async function handleBlockActions(
  *      private_metadata) or an error modal saying "no active session".
  *
  * Without stage 1, a slow stage 2 would let trigger_id expire and Slack
- * would show "/sda-feedback failed" with no modal at all.
+ * would show "/sda-agent-feedback failed" with no modal at all.
  */
 async function handleSlashCommand(
   cmd: SlackSlashCommandPayload,
@@ -324,12 +323,12 @@ async function handleSlashCommand(
 ): Promise<any> {
   const command = (cmd.command || '').trim().toLowerCase();
   if (command !== FEEDBACK_SLASH_COMMAND) {
-    console.log(`[${requestId}] [slash] ignored unknown command: ${command}`);
+    logger.info(`[${requestId}] [slash] ignored unknown command: ${command}`);
     return { reason: `Unknown slash command: ${command}`, status: 'ignored' };
   }
 
   if (!cmd.trigger_id) {
-    console.warn(`[${requestId}] [slash] /sda-feedback missing trigger_id`);
+    logger.warn(`[${requestId}] [slash] /sda-agent-feedback missing trigger_id`);
     return { reason: 'Missing trigger_id', status: 'error' };
   }
 
@@ -338,16 +337,16 @@ async function handleSlashCommand(
   let viewId: string;
   try {
     viewId = await openView(cmd.trigger_id, buildLoadingModal(), slackBotToken);
-    console.log(
-      `[${requestId}] [slash] /sda-feedback loading modal opened view_id=${viewId} channel=${cmd.channel_id} user=${cmd.user_id}`
+    logger.info(
+      `[${requestId}] [slash] /sda-agent-feedback loading modal opened view_id=${viewId} channel=${cmd.channel_id} user=${cmd.user_id}`
     );
   } catch (error: unknown) {
-    console.error(`[${requestId}] [slash] views.open (loading) failed: ${errMsg(error)}`);
+    logger.error(`[${requestId}] [slash] views.open (loading) failed: ${errMsg(error)}`);
     return { details: errMsg(error), reason: 'views.open failed', status: 'error' };
   }
 
   if (!viewId) {
-    console.warn(`[${requestId}] [slash] views.open returned no view id`);
+    logger.warn(`[${requestId}] [slash] views.open returned no view id`);
     return { reason: 'No view id', status: 'error' };
   }
 
@@ -356,23 +355,23 @@ async function handleSlashCommand(
   try {
     session = await getLatestActiveSessionForUserInChannel(storeConfig, cmd.channel_id, cmd.user_id);
   } catch (error: unknown) {
-    console.warn(`[${requestId}] [slash] active-session lookup failed: ${errMsg(error)}`);
+    logger.warn(`[${requestId}] [slash] active-session lookup failed: ${errMsg(error)}`);
   }
 
   if (!session) {
-    console.log(
+    logger.info(
       `[${requestId}] [slash] no active session for user=${cmd.user_id} channel=${cmd.channel_id} — showing error modal`
     );
     try {
       await updateView(
         viewId,
         buildErrorModal(
-          'No active SDA Agent conversation was found in this channel.\n\nStart a conversation by mentioning the bot or sending a direct message, then run `/sda-feedback` again to share your feedback.'
+          'No active SDA Agent conversation was found in this channel.\n\nStart a conversation by mentioning the bot or sending a direct message, then run `/sda-agent-feedback` again to share your feedback.'
         ),
         slackBotToken
       );
     } catch (error: unknown) {
-      console.warn(`[${requestId}] [slash] views.update (error) failed: ${errMsg(error)}`);
+      logger.warn(`[${requestId}] [slash] views.update (error) failed: ${errMsg(error)}`);
     }
     return { mode: 'feedback_no_session', status: 'success' };
   }
@@ -386,10 +385,10 @@ async function handleSlashCommand(
   };
   try {
     await updateView(viewId, buildFeedbackModal(ctx), slackBotToken);
-    console.log(`[${requestId}] [slash] /sda-feedback form rendered for session=${session.sessionId}`);
+    logger.info(`[${requestId}] [slash] /sda-agent-feedback form rendered for session=${session.sessionId}`);
     return { mode: 'feedback_modal_opened', session_id: session.sessionId, status: 'success' };
   } catch (error: unknown) {
-    console.error(`[${requestId}] [slash] views.update failed: ${errMsg(error)}`);
+    logger.error(`[${requestId}] [slash] views.update failed: ${errMsg(error)}`);
     return { details: errMsg(error), reason: 'views.update failed', status: 'error' };
   }
 }
@@ -410,7 +409,7 @@ async function handleViewSubmission(
 
   const ctx = decodeContext(payload.view.private_metadata);
   if (!ctx) {
-    console.warn(`[${requestId}] [feedback] submit: invalid private_metadata`);
+    logger.warn(`[${requestId}] [feedback] submit: invalid private_metadata`);
     return responseActionErrors({
       [FEEDBACK_BLOCK_RATING]: 'We could not identify your session. Please close this form and try again.',
     });
@@ -440,11 +439,11 @@ async function handleViewSubmission(
       sessionRecord = await getLatestActiveSessionForUserInChannel(storeConfig, ctx.channel, ctx.userId);
     }
   } catch (error: unknown) {
-    console.warn(`[${requestId}] [feedback] session lookup failed: ${errMsg(error)}`);
+    logger.warn(`[${requestId}] [feedback] session lookup failed: ${errMsg(error)}`);
   }
 
   if (!sessionRecord) {
-    console.warn(
+    logger.warn(
       `[${requestId}] [feedback] no active session for sessionId=${ctx.sessionId || '∅'} channel=${
         ctx.channel || '∅'
       } user=${ctx.userId || '∅'}`
@@ -468,11 +467,11 @@ async function handleViewSubmission(
       feedbackSubmittedAt: submittedAt,
       feedbackText: comment,
     });
-    console.log(
+    logger.info(
       `[${requestId}] [feedback] persisted session=${ctx.sessionId} rating=${rating} comment_chars=${comment.length}`
     );
   } catch (error: unknown) {
-    console.error(`[${requestId}] [feedback] patchSession failed: ${errMsg(error)}`);
+    logger.error(`[${requestId}] [feedback] patchSession failed: ${errMsg(error)}`);
     return responseActionErrors({
       [FEEDBACK_BLOCK_RATING]: 'We could not save your feedback right now. Please try again.',
     });
@@ -484,9 +483,9 @@ async function handleViewSubmission(
   if (promptTsToDelete && sessionRecord.channel) {
     try {
       await deleteMessage(sessionRecord.channel, promptTsToDelete, slackBotToken);
-      console.log(`[${requestId}] [feedback] deleted prompt ts=${promptTsToDelete}`);
+      logger.info(`[${requestId}] [feedback] deleted prompt ts=${promptTsToDelete}`);
     } catch (err: unknown) {
-      console.warn(`[${requestId}] [feedback] prompt delete failed: ${errMsg(err)}`);
+      logger.warn(`[${requestId}] [feedback] prompt delete failed: ${errMsg(err)}`);
     }
   }
 
@@ -512,7 +511,7 @@ async function handleViewSubmission(
         confirmThread
       );
     } catch (err: unknown) {
-      console.warn(`[${requestId}] [feedback] ephemeral send failed: ${errMsg(err)}`);
+      logger.warn(`[${requestId}] [feedback] ephemeral send failed: ${errMsg(err)}`);
     }
   }
 
@@ -601,12 +600,12 @@ async function tryFastPathBlockActions(
 
   const ctx = decodeContext(action.value);
   if (!ctx) {
-    console.warn(`[${requestId}] [block_actions] fast-path: invalid context`);
+    logger.warn(`[${requestId}] [block_actions] fast-path: invalid context`);
     return null;
   }
   const slackBotToken = keyrings?.['slack_bot_token'];
   if (!slackBotToken) {
-    console.warn(`[${requestId}] [block_actions] fast-path: slack_bot_token missing`);
+    logger.warn(`[${requestId}] [block_actions] fast-path: slack_bot_token missing`);
     return null;
   }
 
@@ -615,49 +614,29 @@ async function tryFastPathBlockActions(
   // even on cold starts (~50ms payload, no DevRev round-trip). The
   // returned view_id has no expiry — we then call views.update to
   // swap in the real form. This is the same trick that makes the
-  // /sda-feedback flow reliable; applying it here gives the button
+  // /sda-agent-feedback flow reliable; applying it here gives the button
   // the same reliability.
   let viewId: string;
   try {
     viewId = await openView(click.trigger_id, buildLoadingModal(), slackBotToken);
-    console.log(`[${requestId}] [block_actions] fast-path: loading modal opened view_id=${viewId}`);
+    logger.info(`[${requestId}] [block_actions] fast-path: loading modal opened view_id=${viewId}`);
   } catch (error: unknown) {
-    console.error(`[${requestId}] [block_actions] fast-path views.open (loading) failed: ${errMsg(error)}`);
+    logger.error(`[${requestId}] [block_actions] fast-path views.open (loading) failed: ${errMsg(error)}`);
     return { details: errMsg(error), reason: 'views.open failed', status: 'error' };
   }
 
   if (!viewId) {
-    console.warn(`[${requestId}] [block_actions] fast-path: no view id returned`);
+    logger.warn(`[${requestId}] [block_actions] fast-path: no view id returned`);
     return { reason: 'No view id', status: 'error' };
   }
 
   // Stage 2: swap in the real form. view_id is durable, no clock to race.
   try {
     await updateView(viewId, buildFeedbackModal(ctx), slackBotToken);
-    console.log(`[${requestId}] [block_actions] fast-path: real form rendered session=${ctx.sessionId}`);
+    logger.info(`[${requestId}] [block_actions] fast-path: real form rendered session=${ctx.sessionId}`);
     return { mode: 'feedback_modal_opened', session_id: ctx.sessionId, status: 'success' };
   } catch (error: unknown) {
-    console.error(`[${requestId}] [block_actions] fast-path views.update failed: ${errMsg(error)}`);
+    logger.error(`[${requestId}] [block_actions] fast-path views.update failed: ${errMsg(error)}`);
     return { details: errMsg(error), reason: 'views.update failed', status: 'error' };
   }
-}
-
-/**
- * Parse application/x-www-form-urlencoded into a plain object.
- * Slack's slash-command and interactivity bodies arrive in this shape.
- */
-function parseFormUrlEncoded(input: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const segment of input.split('&')) {
-    if (!segment) continue;
-    const eq = segment.indexOf('=');
-    const k = eq >= 0 ? segment.slice(0, eq) : segment;
-    const v = eq >= 0 ? segment.slice(eq + 1) : '';
-    try {
-      out[decodeURIComponent(k.replace(/\+/g, ' '))] = decodeURIComponent(v.replace(/\+/g, ' '));
-    } catch {
-      out[k] = v;
-    }
-  }
-  return out;
 }

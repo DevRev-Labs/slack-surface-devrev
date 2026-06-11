@@ -25,6 +25,7 @@ import { createHash, randomUUID } from 'crypto';
 
 import { ConversationReference } from './conversation-store';
 import { getOrCreateActAsToken } from './devrev-auth';
+import { logger } from './logger';
 import { SessionTimingConfig } from './session-config';
 import { omitImmutable, SESSION_FIELD, SESSION_IMMUTABLE_FIELDS } from './session-fields';
 
@@ -338,7 +339,7 @@ async function listConversations(config: StoreConfig, limit: number): Promise<an
     const response = await axios.post(`${config.devrevEndpoint}/conversations.list`, body, authHeaders(config));
     return response.data?.conversations || [];
   } catch (error: any) {
-    console.warn('[session-store] conversations.list failed', {
+    logger.warn('[session-store] conversations.list failed', {
       err_data: error?.response?.data,
       err_status: error?.response?.status,
     });
@@ -425,7 +426,7 @@ async function writeSession(config: StoreConfig, record: SessionRecord, isCreate
       }
       return record;
     } catch (error: any) {
-      console.error('[session-store] conversations.create failed', {
+      logger.error('[session-store] conversations.create failed', {
         err_data: error?.response?.data,
         err_status: error?.response?.status,
         session_id: record.sessionId,
@@ -443,7 +444,7 @@ async function writeSession(config: StoreConfig, record: SessionRecord, isCreate
     await axios.post(`${config.devrevEndpoint}/conversations.update`, updatePayload, authHeaders(config));
     return record;
   } catch (error: any) {
-    console.error('[session-store] conversations.update failed', {
+    logger.error('[session-store] conversations.update failed', {
       err_data: error?.response?.data,
       err_status: error?.response?.status,
       session_id: record.sessionId,
@@ -504,7 +505,7 @@ export async function getActiveSession(config: StoreConfig, conversationKey: str
 }
 
 /**
- * Slash-command lookup: a `/sda-feedback` invocation has no thread_ts, so the
+ * Slash-command lookup: a `/sda-agent-feedback` invocation has no thread_ts, so the
  * conversation_key path can't be used. Instead, scan active sessions for
  * (channel, userId) and return the most-recently-used. Returns null when
  * the user has no active session in this channel.
@@ -600,7 +601,7 @@ export async function touchSession(
     conversationType: patch.conversationType ?? record.conversationType,
     devrevUserId: patch.devrevUserId ?? record.devrevUserId,
     expiresAt: now + timing.idleTtlMs,
-    feedbackPromptTs: patch.feedbackPromptTs === null ? '' : patch.feedbackPromptTs ?? record.feedbackPromptTs,
+    feedbackPromptTs: patch.feedbackPromptTs === null ? '' : (patch.feedbackPromptTs ?? record.feedbackPromptTs),
     feedbackRating: patch.feedbackRating ?? record.feedbackRating,
     feedbackSubmittedAt: patch.feedbackSubmittedAt ?? record.feedbackSubmittedAt,
     feedbackText: patch.feedbackText ?? record.feedbackText,
@@ -610,7 +611,7 @@ export async function touchSession(
     messageCount: (record.messageCount || 0) + 1,
     messageTs: patch.messageTs ?? record.messageTs,
     teamId: patch.teamId ?? record.teamId,
-    tempMessageTs: patch.tempMessageTs === null ? '' : patch.tempMessageTs ?? record.tempMessageTs,
+    tempMessageTs: patch.tempMessageTs === null ? '' : (patch.tempMessageTs ?? record.tempMessageTs),
     threadTs: patch.threadTs ?? record.threadTs,
     userEmail: patch.userEmail ?? record.userEmail,
     userName: patch.userName ?? record.userName,
@@ -635,14 +636,14 @@ export async function patchSession(
     channelName: patch.channelName ?? record.channelName,
     conversationType: patch.conversationType ?? record.conversationType,
     devrevUserId: patch.devrevUserId ?? record.devrevUserId,
-    feedbackPromptTs: patch.feedbackPromptTs === null ? '' : patch.feedbackPromptTs ?? record.feedbackPromptTs,
+    feedbackPromptTs: patch.feedbackPromptTs === null ? '' : (patch.feedbackPromptTs ?? record.feedbackPromptTs),
     feedbackRating: patch.feedbackRating ?? record.feedbackRating,
     feedbackSubmittedAt: patch.feedbackSubmittedAt ?? record.feedbackSubmittedAt,
     feedbackText: patch.feedbackText ?? record.feedbackText,
     lastDeliveredTurn: patch.lastDeliveredTurn ?? record.lastDeliveredTurn,
     messageTs: patch.messageTs ?? record.messageTs,
     teamId: patch.teamId ?? record.teamId,
-    tempMessageTs: patch.tempMessageTs === null ? '' : patch.tempMessageTs ?? record.tempMessageTs,
+    tempMessageTs: patch.tempMessageTs === null ? '' : (patch.tempMessageTs ?? record.tempMessageTs),
     threadTs: patch.threadTs ?? record.threadTs,
     userEmail: patch.userEmail ?? record.userEmail,
     userName: patch.userName ?? record.userName,
@@ -730,7 +731,7 @@ export async function deleteSession(config: StoreConfig, record: SessionRecord):
       { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } }
     );
   } catch (error: any) {
-    console.warn('[session-store] failed to delete session', {
+    logger.warn('[session-store] failed to delete session', {
       err_data: error?.response?.data,
       err_status: error?.response?.status,
       object_id: record.objectId,

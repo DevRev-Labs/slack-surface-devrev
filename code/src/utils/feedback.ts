@@ -2,7 +2,7 @@
  * Feedback flow — Block-Kit modal definitions for the in-Slack
  * "rate this conversation" form.
  *
- * Trigger: a real Slack slash command (`/sda-feedback`). Slack delivers the
+ * Trigger: a real Slack slash command (`/sda-agent-feedback`). Slack delivers the
  * slash-command form payload to our interactivity webhook with a fresh
  * `trigger_id`, so we open the modal directly via `views.open` — no
  * intermediate "click a button" hop.
@@ -23,7 +23,7 @@ export const FEEDBACK_ACTION_TEXT = 'comment';
 // Slash command Slack delivers to the interactivity webhook. Configured
 // in the Slack app's "Slash Commands" page; mirrored here so the
 // dispatcher can reject other commands cleanly.
-export const FEEDBACK_SLASH_COMMAND = '/sda-feedback';
+export const FEEDBACK_SLASH_COMMAND = '/sda-agent-feedback';
 
 // action_id of the "Submit your feedback" button posted by session_gc
 // when a session idle-expires. Click delivers a block_actions payload
@@ -58,7 +58,7 @@ export type SlackView = any;
 export type SlackBlock = any;
 
 /**
- * The modal Slack opens when the user runs `/sda-feedback`. Rating is a
+ * The modal Slack opens when the user runs `/sda-agent-feedback`. Rating is a
  * static_select 1-5; comment is an optional multiline plain_text_input.
  * Slack auto-renders Submit/Cancel buttons from the view's `submit`/
  * `close` fields — they don't need to be blocks.

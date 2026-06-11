@@ -11,14 +11,35 @@
 
 import axios from 'axios';
 
+import { logger } from './logger';
+
+/**
+ * Arguments for `postTimelineComment`. Bundled as an object to keep the
+ * call-site readable (positional booleans / strings get hard to scan).
+ */
 export interface PostTimelineCommentArgs {
+  /** Regional DevRev API endpoint, no trailing slash. */
   devrevEndpoint: string;
+  /** Auth token. Use the user's act-as token to author as the user; the
+   *  service-account token to author as the bot. */
   token: string;
+  /** DevRev conversation DON the comment attaches to. */
   conversationId: string;
+  /** Plaintext body. Multiline OK; DevRev preserves line breaks. */
   body: string;
+  /** Optional dedup key — DevRev will reject a duplicate (object, ref) pair. */
   externalRef?: string;
 }
 
+/**
+ * Post a `timeline_comment` entry on the given conversation.
+ *
+ * Best-effort by design: any failure is logged at warn and `null` is returned
+ * so the caller (Slack reply) can continue uninterrupted.
+ *
+ * @returns The new timeline-entry id on success; `null` on any error or
+ *          when required arguments are missing.
+ */
 export async function postTimelineComment(args: PostTimelineCommentArgs): Promise<string | null> {
   const { devrevEndpoint, token, conversationId, body, externalRef } = args;
   if (!devrevEndpoint || !token || !conversationId || !body) return null;
@@ -40,7 +61,7 @@ export async function postTimelineComment(args: PostTimelineCommentArgs): Promis
     });
     return response.data?.timeline_entry?.id || null;
   } catch (error: any) {
-    console.warn('[timeline] timeline_comment create failed', {
+    logger.warn('[timeline] timeline_comment create failed', {
       conversation_id: conversationId,
       err_data: error?.response?.data,
       err_status: error?.response?.status,

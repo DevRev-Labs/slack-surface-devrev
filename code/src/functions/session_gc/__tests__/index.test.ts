@@ -209,4 +209,127 @@ describe('session_gc', () => {
     expect(result.reason).toContain('missing');
     expect(mockedSessionStore.listIdleExpiredSessions).not.toHaveBeenCalled();
   });
+
+  test('listIdleExpiredSessions failure is logged and the hard pass still runs', async () => {
+    // The catch block in runGc must isolate idle-list failures so the hard
+    // sweep is not blocked by them — otherwise a transient list error
+    // would prevent any cleanup that tick.
+    const errSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    mockedSessionStore.listIdleExpiredSessions.mockRejectedValueOnce(new Error('idle list down'));
+    const hard = makeRecord({ objectId: 'co-h', sessionId: 'uuid-h' });
+    mockedSessionStore.listHardExpiredSessions.mockResolvedValueOnce([hard]);
+
+    const result = await run([mockEvent]);
+
+    expect(result.status).toBe('success');
+    expect(result.sessions_deleted).toBe(1);
+    errSpy.mockRestore();
+  });
+
+  test('listHardExpiredSessions failure does not prevent reporting the idle pass', async () => {
+    const errSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const idle = makeRecord({ sessionId: 'uuid-i' });
+    mockedSessionStore.listIdleExpiredSessions.mockResolvedValueOnce([idle]);
+    mockedSessionStore.listHardExpiredSessions.mockRejectedValueOnce(new Error('hard list down'));
+
+    const result = await run([mockEvent]);
+
+    expect(result.idle_marked).toBe(1);
+    expect(result.sessions_deleted).toBe(0);
+    errSpy.mockRestore();
+  });
+
+  test('endSession failure on one record does not block subsequent records', async () => {
+    const errSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const a = makeRecord({ sessionId: 'uuid-a' });
+    const b = makeRecord({ sessionId: 'uuid-b' });
+    mockedSessionStore.listIdleExpiredSessions.mockResolvedValueOnce([a, b]);
+    mockedSessionStore.endSession
+      .mockRejectedValueOnce(new Error('boom on a'))
+      .mockResolvedValueOnce({ ...b, endReason: 'idle_timeout', status: 'expired' });
+
+    const result = await run([mockEvent]);
+
+    // Both records were attempted; the failure on `a` did not abort the loop.
+    expect(mockedSessionStore.endSession).toHaveBeenCalledTimes(2);
+    expect(result.status).toBe('success');
+    errSpy.mockRestore();
+  });
+
+  test('feedback-prompt post failure is swallowed so the GC keeps running', async () => {
+    const errSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const idle = makeRecord({ channel: 'C', sessionId: 'uuid-prompt-fail' });
+    mockedSessionStore.listIdleExpiredSessions.mockResolvedValueOnce([idle]);
+    mockedSlackClient.sendBlocksMessage.mockRejectedValueOnce(new Error('slack 500'));
+
+    const result = await run([mockEvent]);
+
+    // Even though prompt post failed, endSession succeeded and the GC reports
+    // a healthy result — Slack is best-effort.
+    expect(result.status).toBe('success');
+    expect(result.idle_marked).toBe(1);
+    errSpy.mockRestore();
+  });
+
+  test('skips feedback prompt when slack_bot_token is not configured', async () => {
+    const idle = makeRecord({ channel: 'C', sessionId: 'uuid-no-token' });
+    mockedSessionStore.listIdleExpiredSessions.mockResolvedValueOnce([idle]);
+    const eventNoSlack = {
+      ...mockEvent,
+      input_data: { ...mockEvent.input_data, keyrings: {} },
+    };
+
+    await run([eventNoSlack]);
+
+    expect(mockedSlackClient.sendBlocksMessage).not.toHaveBeenCalled();
+  });
+
+  test('skips feedback prompt when the session has no channel routing info', async () => {
+    const idle = makeRecord({ channel: '', sessionId: 'uuid-no-channel' });
+    mockedSessionStore.listIdleExpiredSessions.mockResolvedValueOnce([idle]);
+
+    await run([mockEvent]);
+
+    expect(mockedSlackClient.sendBlocksMessage).not.toHaveBeenCalled();
+  });
+
+  test('hard expiry: deleteMessage failure does not block the session delete', async () => {
+    const errSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const hard = makeRecord({
+      channel: 'C',
+      feedbackPromptTs: 'old-ts',
+      objectId: 'co-h',
+      sessionId: 'uuid-h',
+    });
+    mockedSessionStore.listHardExpiredSessions.mockResolvedValueOnce([hard]);
+    mockedSlackClient.deleteMessage.mockRejectedValueOnce(new Error('not found'));
+
+    const result = await run([mockEvent]);
+
+    expect(mockedSessionStore.deleteSession).toHaveBeenCalledWith(expect.anything(), hard);
+    expect(result.sessions_deleted).toBe(1);
+    errSpy.mockRestore();
+  });
+
+  test('runs across multiple events, returning per-event results when >1', async () => {
+    // The default export reduces to the single result for one event but
+    // returns an array when more than one is delivered in the batch.
+    const result = await run([mockEvent, mockEvent]);
+    expect(Array.isArray(result)).toBe(true);
+    expect(result).toHaveLength(2);
+  });
+
+  test('top-level rejection inside runGc is caught and reported as error', async () => {
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    // Force an unhandled rejection by making the first store call synchronous-throw.
+    mockedSessionStore.listIdleExpiredSessions.mockImplementationOnce(() => {
+      throw new Error('synchronous boom');
+    });
+
+    const result = await run([mockEvent]);
+
+    expect(result.status).toBe('error');
+    expect(typeof result.reason).toBe('string');
+    errSpy.mockRestore();
+  });
 });

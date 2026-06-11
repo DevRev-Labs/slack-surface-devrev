@@ -6,7 +6,12 @@
 
 import axios from 'axios';
 
-const SLACK_API_BASE = 'https://slack.com/api';
+import { HTTP_CONFIG } from '../config/defaults';
+import { logger } from './logger';
+
+// Source the Slack base URL from config so it can be overridden per env
+// (mock servers, regional Slack endpoints, etc.) without code changes.
+const SLACK_API_BASE = HTTP_CONFIG.slackApiBase;
 
 /**
  * Response from Slack API chat methods.
@@ -102,7 +107,7 @@ export async function sendMessage(
 
     return response.data.ts ?? '';
   } catch (error: any) {
-    console.error('Slack sendMessage error:', error.response?.data || error.message);
+    logger.error('Slack sendMessage error', { detail: error.response?.data || error.message });
     throw new Error(`Failed to send message to Slack: ${error.message}`);
   }
 }
@@ -132,7 +137,7 @@ export async function sendBlocksMessage(
     }
     return response.data.ts ?? '';
   } catch (error: any) {
-    console.error('Slack sendBlocksMessage error:', error.response?.data || error.message);
+    logger.error('Slack sendBlocksMessage error', { detail: error.response?.data || error.message });
     throw new Error(`Failed to send blocks message to Slack: ${error.message}`);
   }
 }
@@ -164,7 +169,7 @@ export async function postEphemeral(
       throw new Error(`Slack API error: ${response.data.error}`);
     }
   } catch (error: any) {
-    console.error('Slack postEphemeral error:', error.response?.data || error.message);
+    logger.error('Slack postEphemeral error', { detail: error.response?.data || error.message });
     throw new Error(`Failed to send ephemeral message: ${error.message}`);
   }
 }
@@ -191,7 +196,7 @@ export async function openView(triggerId: string, view: any, botToken: string): 
     }
     return response.data.view?.id || '';
   } catch (error: any) {
-    console.error('Slack openView error:', error.response?.data || error.message);
+    logger.error('Slack openView error', { detail: error.response?.data || error.message });
     throw new Error(`Failed to open Slack view: ${error.message}`);
   }
 }
@@ -212,7 +217,7 @@ export async function updateView(viewId: string, view: any, botToken: string): P
       throw new Error(`Slack API error: ${response.data.error}`);
     }
   } catch (error: any) {
-    console.error('Slack updateView error:', error.response?.data || error.message);
+    logger.error('Slack updateView error', { detail: error.response?.data || error.message });
     throw new Error(`Failed to update Slack view: ${error.message}`);
   }
 }
@@ -254,7 +259,7 @@ export async function updateMessage(
       throw new Error(`Slack API error: ${response.data.error}`);
     }
   } catch (error: any) {
-    console.error('Slack updateMessage error:', error.response?.data || error.message);
+    logger.error('Slack updateMessage error', { detail: error.response?.data || error.message });
     throw new Error(`Failed to update message in Slack: ${error.message}`);
   }
 }
@@ -289,7 +294,7 @@ export async function deleteMessage(channel: string, ts: string, botToken: strin
       }
     }
   } catch (error: any) {
-    console.error('Slack deleteMessage error:', error.response?.data || error.message);
+    logger.error('Slack deleteMessage error', { detail: error.response?.data || error.message });
     // Don't throw for delete failures - it's not critical
   }
 }
@@ -306,7 +311,7 @@ export async function getUserProfile(userId: string, botToken: string): Promise<
     });
 
     if (!response.data.ok) {
-      console.error(`Slack users.info error: ${response.data.error}`);
+      logger.error('Slack users.info error', { error: response.data.error });
       return { email: null, name: null };
     }
 
@@ -317,7 +322,7 @@ export async function getUserProfile(userId: string, botToken: string): Promise<
       name: name && name.trim() ? name.trim() : null,
     };
   } catch (error: any) {
-    console.error('Slack getUserProfile error:', error.response?.data || error.message);
+    logger.error('Slack getUserProfile error', { detail: error.response?.data || error.message });
     return { email: null, name: null };
   }
 }
@@ -335,13 +340,13 @@ export async function getChannelName(channelId: string, botToken: string): Promi
     });
 
     if (!response.data.ok) {
-      console.warn(`Slack conversations.info error for ${channelId}: ${response.data.error}`);
+      logger.warn('Slack conversations.info error', { channelId, error: response.data.error });
       return null;
     }
 
     return response.data.channel?.name || null;
   } catch (error: any) {
-    console.warn('Slack getChannelName error:', error.response?.data || error.message);
+    logger.warn('Slack getChannelName error', { detail: error.response?.data || error.message });
     return null;
   }
 }

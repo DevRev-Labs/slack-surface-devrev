@@ -98,11 +98,11 @@ describe('slack_interactivity', () => {
   });
 
   describe('slash command', () => {
-    test('/sda-feedback: opens loading modal first, then resolves session, then updates with form', async () => {
+    test('/sda-agent-feedback: opens loading modal first, then resolves session, then updates with form', async () => {
       const result = await run([
         makeBaseEvent({
           channel_id: 'C1',
-          command: '/sda-feedback',
+          command: '/sda-agent-feedback',
           trigger_id: 'trig-1',
           user_id: 'U1',
         }),
@@ -135,12 +135,12 @@ describe('slack_interactivity', () => {
       expect(result.session_id).toBe('sess-1');
     });
 
-    test('/sda-feedback: no active session → loading modal updated to friendly error', async () => {
+    test('/sda-agent-feedback: no active session → loading modal updated to friendly error', async () => {
       mockedSessionStore.getLatestActiveSessionForUserInChannel.mockResolvedValue(null);
       const result = await run([
         makeBaseEvent({
           channel_id: 'C-no',
-          command: '/sda-feedback',
+          command: '/sda-agent-feedback',
           trigger_id: 'trig-2',
           user_id: 'U-no',
         }),
@@ -168,7 +168,7 @@ describe('slack_interactivity', () => {
     });
 
     test('/feedback without trigger_id is rejected', async () => {
-      const result = await run([makeBaseEvent({ channel_id: 'C1', command: '/sda-feedback', user_id: 'U1' })]);
+      const result = await run([makeBaseEvent({ channel_id: 'C1', command: '/sda-agent-feedback', user_id: 'U1' })]);
       expect(result.status).toBe('error');
     });
   });
@@ -325,7 +325,7 @@ describe('slack_interactivity', () => {
     validator.validateSlackSignature.mockReturnValueOnce({ reason: 'bad', valid: false });
 
     const result = await run([
-      makeBaseEvent({ channel_id: 'C', command: '/sda-feedback', trigger_id: 't', user_id: 'U' }),
+      makeBaseEvent({ channel_id: 'C', command: '/sda-agent-feedback', trigger_id: 't', user_id: 'U' }),
     ]);
     expect(result).toEqual({ status: 'forbidden', status_code: 403 });
     expect(mockedSlackClient.openView).not.toHaveBeenCalled();
