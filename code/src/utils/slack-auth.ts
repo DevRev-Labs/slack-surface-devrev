@@ -21,16 +21,37 @@
 import { getUserProfile } from './slack-client';
 
 /**
- * Strict-enough email regex for input validation. Mirrors the one used
- * historically inside the handler so behaviour is unchanged.
+ * Strict-enough email validation for the operator-supplied mock-email input.
  *
  * NOT meant for full RFC-5322 parsing — this only weeds out bare strings
  * like `"notanemail"` that operators sometimes paste into the mock-email
  * input by mistake. Real address-of-record validation happens server-side
  * in DevRev.
+ *
+ * Implemented as linear-time index/character checks rather than the
+ * historical `/^[^\s@]+@[^\s@]+\.[^\s@]+$/` regex: that regex's two
+ * overlapping `[^\s@]+` quantifiers (with the literal `.` itself in the
+ * `[^\s@]` class) are polynomial-time on adversarial inputs of the form
+ * `!@!.!.!....` (CodeQL js/polynomial-redos). The replacement preserves
+ * the original accept/reject set.
  */
 export function isValidEmail(email: string): boolean {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  if (typeof email !== 'string' || email.length === 0) return false;
+  // Whitespace anywhere is rejected — matches the historical `[^\s@]` class.
+  // A single character-class test is O(n) with no backtracking.
+  if (/\s/.test(email)) return false;
+  const atIdx = email.indexOf('@');
+  // Exactly one '@', not at the start, not at the end.
+  if (atIdx <= 0) return false;
+  if (atIdx !== email.lastIndexOf('@')) return false;
+  if (atIdx === email.length - 1) return false;
+  // Domain must contain at least one '.', not immediately after '@' and not
+  // at the very end (so both labels around the dot are non-empty).
+  const domainStart = atIdx + 1;
+  const firstDotIdx = email.indexOf('.', domainStart);
+  if (firstDotIdx <= domainStart) return false;
+  if (firstDotIdx === email.length - 1) return false;
+  return true;
 }
 
 /** Result of resolving a Slack user identity. */

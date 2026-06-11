@@ -43,6 +43,20 @@ describe('isValidEmail', () => {
   it('rejects strings missing the local part', () => {
     expect(isValidEmail('@devrev.ai')).toBe(false);
   });
+
+  it('returns quickly on adversarial inputs (ReDoS regression)', () => {
+    // CodeQL js/polynomial-redos previously flagged `/^[^\s@]+@[^\s@]+\.[^\s@]+$/`
+    // because the two `[^\s@]+` ranges plus a literal `.` (which is itself in
+    // the class) backtrack polynomially on inputs like `!@!.!.!.....`. Guard
+    // against regressing back to that shape: a 5_000-char malicious string
+    // must complete well under a second.
+    const malicious = '!@' + '!.'.repeat(5_000);
+    const start = Date.now();
+    const result = isValidEmail(malicious);
+    const elapsedMs = Date.now() - start;
+    expect(typeof result).toBe('boolean');
+    expect(elapsedMs).toBeLessThan(100);
+  });
 });
 
 describe('resolveUserProfile', () => {
