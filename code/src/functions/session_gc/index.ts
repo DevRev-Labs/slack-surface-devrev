@@ -16,6 +16,7 @@
 /* eslint-disable simple-import-sort/imports */
 import { FunctionInput } from '../../types';
 import { buildFeedbackPromptBlocks, FeedbackContext, FEEDBACK_PROMPT_FALLBACK_TEXT } from '../../utils/feedback';
+import { logger } from '../../utils/logger';
 import {
   deleteSession,
   endSession,
@@ -33,7 +34,7 @@ async function runGc(event: FunctionInput): Promise<any> {
   const eventType = event.execution_metadata.event_type;
   const eventKey = (event.payload as any)?.event_key || (event.payload as any)?.metadata?.event_key || '';
 
-  console.log(`[${requestId}] [gc] tick received`, {
+  logger.info(`[${requestId}] [gc] tick received`, {
     event_key: eventKey,
     event_type: eventType,
     received_at: new Date().toISOString(),
@@ -45,7 +46,7 @@ async function runGc(event: FunctionInput): Promise<any> {
   };
 
   if (!config.devrevEndpoint || !config.serviceAccountToken) {
-    console.warn(`[${requestId}] [gc] missing devrev config — endpoint or service account token absent`);
+    logger.warn(`[${requestId}] [gc] missing devrev config — endpoint or service account token absent`);
     return { reason: 'missing devrev config', status: 'error' };
   }
 
@@ -54,17 +55,17 @@ async function runGc(event: FunctionInput): Promise<any> {
   const slackBotToken: string | undefined = event.input_data.keyrings?.['slack_bot_token'];
 
   const now = Date.now();
-  console.log(`[${requestId}] [gc] sweep starting`, {
+  logger.info(`[${requestId}] [gc] sweep starting`, {
     devrev_endpoint: config.devrevEndpoint,
     now_iso: new Date(now).toISOString(),
   });
 
   // 1. Idle sweep — mark active-but-idle sessions expired.
   const idleSessions = await listIdleExpiredSessions(config, now).catch((error: any) => {
-    console.warn(`[${requestId}] [gc] listIdleExpiredSessions failed:`, error?.message || error);
+    logger.warn(`[${requestId}] [gc] listIdleExpiredSessions failed:`, error?.message || error);
     return [] as SessionRecord[];
   });
-  console.log(`[${requestId}] [gc] idle sweep candidates`, {
+  logger.info(`[${requestId}] [gc] idle sweep candidates`, {
     count: idleSessions.length,
     ids: idleSessions.map((r) => r.objectId),
   });
@@ -72,7 +73,7 @@ async function runGc(event: FunctionInput): Promise<any> {
   for (const record of idleSessions) {
     try {
       const ended = await endSession(config, record, 'idle_timeout');
-      console.log(`[${requestId}] [gc] marked idle-expired`, {
+      logger.info(`[${requestId}] [gc] marked idle-expired`, {
         expires_at: new Date(record.expiresAt).toISOString(),
         last_used_at: new Date(record.lastUsedAt).toISOString(),
         object_id: record.objectId,
@@ -101,28 +102,28 @@ async function runGc(event: FunctionInput): Promise<any> {
             ended.threadTs || undefined
           );
           await patchSession(config, ended, { feedbackPromptTs: promptTs });
-          console.log(`[${requestId}] [gc] feedback prompt posted`, {
+          logger.info(`[${requestId}] [gc] feedback prompt posted`, {
             prompt_ts: promptTs,
             session_id: ended.sessionId,
           });
         } catch (postErr: any) {
-          console.warn(
+          logger.warn(
             `[${requestId}] [gc] feedback prompt post failed for ${ended.sessionId}:`,
             postErr?.message || postErr
           );
         }
       }
     } catch (error: any) {
-      console.warn(`[${requestId}] [gc] endSession(idle) failed for ${record.sessionId}:`, error?.message || error);
+      logger.warn(`[${requestId}] [gc] endSession(idle) failed for ${record.sessionId}:`, error?.message || error);
     }
   }
 
   // 2. Hard sweep — delete records past the absolute timeout.
   const hardSessions = await listHardExpiredSessions(config, now).catch((error: any) => {
-    console.warn(`[${requestId}] [gc] listHardExpiredSessions failed:`, error?.message || error);
+    logger.warn(`[${requestId}] [gc] listHardExpiredSessions failed:`, error?.message || error);
     return [] as SessionRecord[];
   });
-  console.log(`[${requestId}] [gc] hard sweep candidates`, {
+  logger.info(`[${requestId}] [gc] hard sweep candidates`, {
     count: hardSessions.length,
     ids: hardSessions.map((r) => r.objectId),
   });
@@ -130,7 +131,7 @@ async function runGc(event: FunctionInput): Promise<any> {
   let sessionsDeleted = 0;
   for (const record of hardSessions) {
     if (!record.objectId) {
-      console.log(`[${requestId}] [gc] skipping hard-expired record with no object id`, {
+      logger.info(`[${requestId}] [gc] skipping hard-expired record with no object id`, {
         session_id: record.sessionId,
       });
       continue;
@@ -143,14 +144,14 @@ async function runGc(event: FunctionInput): Promise<any> {
     if (slackBotToken && record.channel && record.feedbackPromptTs) {
       try {
         await deleteMessage(record.channel, record.feedbackPromptTs, slackBotToken);
-        console.log(`[${requestId}] [gc] deleted feedback prompt`, {
+        logger.info(`[${requestId}] [gc] deleted feedback prompt`, {
           prompt_ts: record.feedbackPromptTs,
           session_id: record.sessionId,
         });
       } catch (delErr: any) {
         // chat.delete already swallows message_not_found; any other failure
         // is logged and ignored — we don't block the session delete.
-        console.warn(
+        logger.warn(
           `[${requestId}] [gc] feedback prompt delete failed for ${record.sessionId}:`,
           delErr?.message || delErr
         );
@@ -158,7 +159,7 @@ async function runGc(event: FunctionInput): Promise<any> {
     }
 
     await deleteSession(config, record);
-    console.log(`[${requestId}] [gc] deleted hard-expired session`, {
+    logger.info(`[${requestId}] [gc] deleted hard-expired session`, {
       end_reason: record.endReason,
       hard_expires_at: new Date(record.hardExpiresAt).toISOString(),
       object_id: record.objectId,
@@ -168,7 +169,7 @@ async function runGc(event: FunctionInput): Promise<any> {
     sessionsDeleted += 1;
   }
 
-  console.log(`[${requestId}] [gc] sweep complete`, {
+  logger.info(`[${requestId}] [gc] sweep complete`, {
     duration_ms: Date.now() - now,
     idle_marked: idleSessions.length,
     sessions_deleted: sessionsDeleted,
@@ -182,11 +183,11 @@ async function runGc(event: FunctionInput): Promise<any> {
 }
 
 export const run = async (events: FunctionInput[]): Promise<any> => {
-  console.log(`[gc] run invoked with ${events.length} event(s)`);
+  logger.info(`[gc] run invoked with ${events.length} event(s)`);
   const results = await Promise.all(
     events.map((event) =>
       runGc(event).catch((error: any) => {
-        console.error(`[gc] runGc threw:`, error?.message || error);
+        logger.error(`[gc] runGc threw:`, error?.message || error);
         return {
           reason: error?.message || 'Unknown error',
           status: 'error',

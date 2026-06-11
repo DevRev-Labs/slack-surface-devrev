@@ -28,6 +28,8 @@
  * match across surfaces.
  */
 
+import { RENDER_CONFIG } from '../config/defaults';
+
 const OBJECT_NAME_TO_PREFIX: Record<string, string> = {
   account: 'ACC',
 
@@ -283,10 +285,11 @@ function convertTableToText(text: string): string {
 
 // Slack limits: a section block's text is capped at 3000 chars, a header
 // block's plain_text at 150 chars, and a single message may carry at most
-// 50 blocks.
-const SECTION_TEXT_LIMIT = 3000;
-const HEADER_TEXT_LIMIT = 150;
-const MAX_BLOCKS = 50;
+// 50 blocks. All three are tunable via env vars in code/src/config/defaults.ts —
+// only loosen below the Slack hard caps if you have a documented reason.
+const SECTION_TEXT_LIMIT = RENDER_CONFIG.sectionTextLimit;
+const HEADER_TEXT_LIMIT = RENDER_CONFIG.headerTextLimit;
+const MAX_BLOCKS = RENDER_CONFIG.maxBlocks;
 
 const RAW_HEADING_RE = /^\s*#{1,6}\s+(.+?)\s*#*$/;
 const HORIZONTAL_RULE_RE = /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/;

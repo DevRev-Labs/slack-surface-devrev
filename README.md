@@ -2,6 +2,146 @@
 
 A DevRev snap-in that integrates Slack with DevRev AI Agents. Receive messages from Slack, process them through AI Agents, and send intelligent responses back to your workspace.
 
+---
+
+## Project Overview
+
+**What it is.** A TypeScript-based DevRev snap-in (server-side function bundle) that bridges a Slack workspace to a DevRev AI Agent. Slack events arrive over the Slack Events API → the snap-in resolves the Slack user to a DevRev user, mints an impersonated (`act-as`) token, and submits the message to the AI Agent. Async AI responses arrive via a DevRev webhook and get rendered back into the originating Slack thread.
+
+**What's included.**
+- `slack_handler` — entry point for `app_mention`, DM, and channel messages.
+- `ai_response_handler` — receives async AI Agent responses and replies in Slack.
+- `slack_interactivity` — slash command (`/sda-agent-feedback`) + modal submissions.
+- `session_gc` — cron-driven idle / hard-expiry cleanup.
+- `ensure_session_state_schema` — activate-hook that registers the custom-fields schema.
+
+---
+
+## Project Structure
+
+```
+slack-surface-devrev/
+├── manifest.yaml                  # DevRev snap-in manifest (functions, sources, inputs)
+├── README.md
+├── .env.example                   # Environment-variable template (see below)
+├── .gitignore                     # Repo-root ignore patterns
+└── code/
+    ├── package.json               # npm scripts: build, lint, lint:check, typecheck, test
+    ├── tsconfig.json
+    ├── jest.config.js
+    ├── .eslintrc.js
+    └── src/
+        ├── main.ts                # CLI entry for local fixture-driven runs
+        ├── function-factory.ts    # Registry of every function name → handler
+        ├── types.ts               # Shared FunctionInput envelope type
+        ├── config/
+        │   └── defaults.ts        # Centralized env-driven runtime config
+        ├── functions/
+        │   ├── slack_handler/             # Inbound Slack events
+        │   ├── ai_response_handler/       # Async AI Agent responses
+        │   ├── slack_interactivity/       # Slash commands + modal submissions
+        │   ├── session_gc/                # Cron-driven session GC
+        │   └── ensure_session_state_schema/   # Activate-hook schema setup
+        ├── utils/
+        │   ├── logger.ts                  # Leveled logger (LOG_LEVEL env var)
+        │   ├── slack-client.ts            # Slack Web API wrappers
+        │   ├── slack-signature-validator.ts   # HMAC-SHA256 verification
+        │   ├── devrev-auth.ts             # DevRev act-as / webhook helpers
+        │   ├── session-store.ts           # Session persistence in conversations
+        │   ├── session-fields.ts          # Custom-field name constants
+        │   ├── session-config.ts          # Session timing config
+        │   ├── conversation-store.ts      # ConversationReference helpers
+        │   ├── feedback.ts                # Feedback modal Block Kit builders
+        │   ├── format-text.ts             # Markdown → Block Kit conversion
+        │   ├── timeline.ts                # Conversation timeline_comment helper
+        │   └── errors.ts                  # Type-safe error utilities
+        └── fixtures/                      # Local-test event payloads
+```
+
+---
+
+## Dependencies
+
+**Runtime**
+- `@devrev/typescript-sdk` — DevRev API client (act-as tokens, webhooks, custom schema, conversations).
+- `axios` — HTTP client for Slack Web API + a few DevRev endpoints not yet on the SDK.
+- `protobufjs` — used transitively by the SDK for snap-ins serialization.
+
+**Dev / build**
+- `typescript`, `ts-node`, `rimraf` — compile + clean.
+- `jest`, `ts-jest`, `babel-jest` — unit tests (153+ tests across handlers and utils).
+- `eslint` (+ `@typescript-eslint`, `prettier`, `import`, `simple-import-sort`, `unused-imports`, `sort-keys-fix`) — linting / formatting.
+- `dotenv` — local `.env` loading for the fixture runner only.
+
+Concrete versions are pinned in [`code/package.json`](code/package.json) — keep them current via `npm audit` and minor-version bumps; major bumps to `@devrev/typescript-sdk` need to track DevRev platform compatibility.
+
+---
+
+## Configuration via Environment Variables
+
+Most operator-tunable knobs live in [`code/src/config/defaults.ts`](code/src/config/defaults.ts) and read from `process.env` at startup. Copy `.env.example` to `.env` for local development:
+
+```bash
+cp .env.example .env
+```
+
+Common variables:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LOG_LEVEL` | `info` | `error` / `warn` / `info` / `debug`. Use `debug` only when triaging. |
+| `WEBHOOK_MAX_WAIT_MS` | `10000` | How long to wait for a fresh DevRev webhook to go active. |
+| `WEBHOOK_POLL_INTERVAL_MS` | `500` | Webhook-status polling interval. |
+| `ACT_AS_TOKEN_TTL_MINUTES` | `30` | act-as token cache lifetime. |
+| `SESSION_IDLE_TIMEOUT_MINUTES` | `480` | Override session idle TTL (also accepted via global_values). |
+| `SESSION_ABSOLUTE_TIMEOUT_HOURS` | `24` | Absolute session lifetime ceiling. |
+| `BLOCK_KIT_MAX_BLOCKS` | `50` | Slack hard-rejects messages with more blocks than this. |
+
+In production, deliver these to the snap-in via the platform's secret manager / global_values — never check in a real `.env`.
+
+---
+
+## Quick Deploy with the DevRev CLI
+
+The full Slack-app + snap-in walkthrough is in [Part 1](#part-1--slack-app-setup) and [Part 2](#part-2--devrev-snap-in-deployment) below. **For a TL;DR using only the DevRev CLI**, after you have the Slack tokens (Steps 1-5):
+
+```bash
+# 0. Authenticate (one-time per shell)
+devrev profiles authenticate --org <your-org-slug> --usr <your-email>
+
+# 1. Build + package the snap-in (run from the repo root)
+cd code && npm install && npm run package && cd ..
+#   → produces code/build.tar.gz
+
+# 2. Create a brand-new snap-in package + version
+devrev snap_in_package create-one --slug slack-surface
+devrev snap_in_version create-one \
+    --package <package-id-from-previous-step> \
+    --manifest manifest.yaml \
+    --archive code/build.tar.gz
+#   → wait until the version's `state` shows `ready`
+
+# 3. Create a draft snap-in from that version, then activate it
+devrev snap_in draft --snap_in_version <version-id-from-step-2>
+devrev snap_in update --snap_in <snap-in-id> \
+    --keyring slack_bot_token=<xoxb-...> \
+    --keyring slack_signing_secret=<...> \
+    --inputs ai_agent_id=<don:core:dvrv-us-1:devo/...:ai_agent/...>
+devrev snap_in activate --snap_in <snap-in-id>
+
+# 4. Iterating: push a new build to an existing version (no new draft needed)
+cd code && npm run package && cd ..
+devrev snap_in_version upgrade <version-id> \
+    --force --manifest manifest.yaml --archive code/build.tar.gz
+
+# 5. Tail logs
+devrev snap_in_package logs --snap_in_package <package-id>
+```
+
+The `<...>` placeholders are returned by the previous command's JSON output. After `devrev snap_in activate`, copy the **Slack Events Webhook URL** the platform issues and paste it into your Slack App's **Event Subscriptions → Request URL** to complete the wiring (see [Step 8](#step-8-set-the-webhook-url-in-slack)).
+
+---
+
 ## Architecture
 
 ```

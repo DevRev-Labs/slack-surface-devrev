@@ -1,5 +1,16 @@
 import axios from 'axios';
-import { deleteMessage, getUserProfile, removeBotMention, sendMessage, updateMessage } from '../slack-client';
+import {
+  deleteMessage,
+  getChannelName,
+  getUserProfile,
+  openView,
+  postEphemeral,
+  removeBotMention,
+  sendBlocksMessage,
+  sendMessage,
+  updateMessage,
+  updateView,
+} from '../slack-client';
 
 jest.mock('axios');
 const mockedAxios = axios as jest.Mocked<typeof axios>;
@@ -170,6 +181,164 @@ describe('slack-client', () => {
       const text = '  <@U123>  hello  ';
       const result = removeBotMention(text);
       expect(result).toBe('hello');
+    });
+  });
+
+  describe('sendBlocksMessage', () => {
+    const blocks = [{ text: { text: 'hi', type: 'mrkdwn' }, type: 'section' }];
+
+    it('posts blocks + fallback text and returns the message ts', async () => {
+      mockedAxios.post.mockResolvedValueOnce({ data: { ok: true, ts: '1705315900.000100' } });
+      const result = await sendBlocksMessage(channel, 'fallback', blocks, botToken);
+      expect(result).toBe('1705315900.000100');
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        'https://slack.com/api/chat.postMessage',
+        { blocks, channel, text: 'fallback' },
+        expect.any(Object)
+      );
+    });
+
+    it('threads the message when threadTs is provided', async () => {
+      mockedAxios.post.mockResolvedValueOnce({ data: { ok: true, ts: '1705315900.000200' } });
+      await sendBlocksMessage(channel, 'fallback', blocks, botToken, ts);
+      const sentBody = mockedAxios.post.mock.calls[0]?.[1] as Record<string, unknown>;
+      expect(sentBody['thread_ts']).toBe(ts);
+    });
+
+    it('throws when Slack returns ok=false', async () => {
+      mockedAxios.post.mockResolvedValueOnce({ data: { error: 'invalid_blocks', ok: false } });
+      await expect(sendBlocksMessage(channel, 'x', blocks, botToken)).rejects.toThrow(/Failed to send blocks/);
+    });
+
+    it('throws on axios rejection (network failure)', async () => {
+      const errSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      mockedAxios.post.mockRejectedValueOnce(new Error('socket hang up'));
+      await expect(sendBlocksMessage(channel, 'x', blocks, botToken)).rejects.toThrow(/Failed to send blocks/);
+      errSpy.mockRestore();
+    });
+  });
+
+  describe('postEphemeral', () => {
+    const user = 'U999';
+
+    it('posts an ephemeral message scoped to the target user', async () => {
+      mockedAxios.post.mockResolvedValueOnce({ data: { ok: true } });
+      await postEphemeral(channel, user, 'private', undefined, botToken);
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        'https://slack.com/api/chat.postEphemeral',
+        { channel, text: 'private', user },
+        expect.any(Object)
+      );
+    });
+
+    it('attaches blocks when provided', async () => {
+      mockedAxios.post.mockResolvedValueOnce({ data: { ok: true } });
+      const blocks = [{ text: { text: 'hi', type: 'mrkdwn' }, type: 'section' }];
+      await postEphemeral(channel, user, 'private', blocks, botToken);
+      const sentBody = mockedAxios.post.mock.calls[0]?.[1] as Record<string, unknown>;
+      expect(sentBody['blocks']).toEqual(blocks);
+    });
+
+    it('threads when threadTs is provided', async () => {
+      mockedAxios.post.mockResolvedValueOnce({ data: { ok: true } });
+      await postEphemeral(channel, user, 'private', undefined, botToken, ts);
+      const sentBody = mockedAxios.post.mock.calls[0]?.[1] as Record<string, unknown>;
+      expect(sentBody['thread_ts']).toBe(ts);
+    });
+
+    it('throws when Slack returns ok=false', async () => {
+      mockedAxios.post.mockResolvedValueOnce({ data: { error: 'channel_not_found', ok: false } });
+      await expect(postEphemeral(channel, user, 'x', undefined, botToken)).rejects.toThrow(/ephemeral/);
+    });
+  });
+
+  describe('openView', () => {
+    const view = { callback_id: 'feedback', title: { text: 'Feedback' }, type: 'modal' };
+
+    it('opens a view via views.open and returns the view id', async () => {
+      mockedAxios.post.mockResolvedValueOnce({ data: { ok: true, view: { id: 'V123' } } });
+      const id = await openView('trig.123', view, botToken);
+      expect(id).toBe('V123');
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        'https://slack.com/api/views.open',
+        { trigger_id: 'trig.123', view },
+        expect.any(Object)
+      );
+    });
+
+    it('returns empty string when Slack omits view.id', async () => {
+      mockedAxios.post.mockResolvedValueOnce({ data: { ok: true, view: {} } });
+      expect(await openView('trig.123', view, botToken)).toBe('');
+    });
+
+    it('throws when Slack returns ok=false (e.g. trigger_id expired)', async () => {
+      mockedAxios.post.mockResolvedValueOnce({ data: { error: 'invalid_trigger_id', ok: false } });
+      await expect(openView('trig.expired', view, botToken)).rejects.toThrow(/Failed to open Slack view/);
+    });
+
+    it('throws on axios rejection', async () => {
+      const errSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      mockedAxios.post.mockRejectedValueOnce(new Error('boom'));
+      await expect(openView('trig.123', view, botToken)).rejects.toThrow(/Failed to open Slack view/);
+      errSpy.mockRestore();
+    });
+  });
+
+  describe('updateView', () => {
+    const view = { type: 'modal' };
+
+    it('updates a modal via views.update', async () => {
+      mockedAxios.post.mockResolvedValueOnce({ data: { ok: true } });
+      await expect(updateView('V123', view, botToken)).resolves.toBeUndefined();
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        'https://slack.com/api/views.update',
+        { view, view_id: 'V123' },
+        expect.any(Object)
+      );
+    });
+
+    it('throws when Slack returns ok=false', async () => {
+      mockedAxios.post.mockResolvedValueOnce({ data: { error: 'not_found', ok: false } });
+      await expect(updateView('V123', view, botToken)).rejects.toThrow(/Failed to update Slack view/);
+    });
+
+    it('throws on axios rejection', async () => {
+      const errSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      mockedAxios.post.mockRejectedValueOnce(new Error('boom'));
+      await expect(updateView('V123', view, botToken)).rejects.toThrow(/Failed to update Slack view/);
+      errSpy.mockRestore();
+    });
+  });
+
+  describe('getChannelName', () => {
+    it('returns the channel name on success', async () => {
+      mockedAxios.get.mockResolvedValueOnce({ data: { channel: { name: 'general' }, ok: true } });
+      expect(await getChannelName('C1', botToken)).toBe('general');
+    });
+
+    it('returns null for an empty channelId without making a request', async () => {
+      const result = await getChannelName('', botToken);
+      expect(result).toBeNull();
+      expect(mockedAxios.get).not.toHaveBeenCalled();
+    });
+
+    it('returns null when Slack returns ok=false (DMs have no name)', async () => {
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+      mockedAxios.get.mockResolvedValueOnce({ data: { error: 'channel_not_found', ok: false } });
+      expect(await getChannelName('C1', botToken)).toBeNull();
+      warnSpy.mockRestore();
+    });
+
+    it('returns null when channel object lacks a name (DMs)', async () => {
+      mockedAxios.get.mockResolvedValueOnce({ data: { channel: { id: 'D1' }, ok: true } });
+      expect(await getChannelName('D1', botToken)).toBeNull();
+    });
+
+    it('returns null on axios rejection — best-effort, never throws', async () => {
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+      mockedAxios.get.mockRejectedValueOnce(new Error('network'));
+      expect(await getChannelName('C1', botToken)).toBeNull();
+      warnSpy.mockRestore();
     });
   });
 });

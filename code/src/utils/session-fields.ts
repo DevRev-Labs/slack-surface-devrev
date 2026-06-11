@@ -14,6 +14,12 @@
 // writes against /conversations.* must use this prefixed form.
 const TNT = 'tnt__';
 
+/**
+ * Map of session field name → DevRev `tnt__`-prefixed `data_name`.
+ *
+ * Use this object instead of string-literal field names so a typo becomes a
+ * compile error and a refactor renames every callsite at once.
+ */
 export const SESSION_FIELD = {
   // Bot / DevRev linkage
   botUserId: `${TNT}bot_user_id`,
@@ -98,6 +104,12 @@ interface FieldSpec {
   is_immutable?: boolean;
 }
 
+/**
+ * Wire-format spec for every session field. Consumed by
+ * `ensure_session_state_schema` to create / update the tenant-fragment via
+ * `/schemas.custom-set`. Names use the un-prefixed form (DevRev applies
+ * the `tnt__` prefix during creation).
+ */
 export const SESSION_FIELD_SPECS: FieldSpec[] = [
   // Identity
   {
@@ -142,13 +154,26 @@ export const SESSION_FIELD_SPECS: FieldSpec[] = [
   { field_type: 'text', name: stripTnt(SESSION_FIELD.feedbackPromptTs) },
 ];
 
+/** Re-exported for callers that build their own custom schemas. */
 export type SchemaFieldSpec = FieldSpec;
 
+/** Compute the set of `tnt__`-prefixed names that must never be patched. */
 const immutableTntNames = (specs: FieldSpec[]): Set<string> =>
   new Set(specs.filter((f) => f.is_immutable).map((f) => `${TNT}${f.name}`));
 
+/**
+ * Pre-computed set of immutable field data-names — passed to `omitImmutable`
+ * before any `/conversations.update` call so the API doesn't 400 on us.
+ */
 export const SESSION_IMMUTABLE_FIELDS = immutableTntNames(SESSION_FIELD_SPECS);
 
+/**
+ * Strip immutable fields from a custom_fields blob before sending an update.
+ *
+ * @param fields    custom_fields payload to filter (returned shallow-copied).
+ * @param immutable Set of `tnt__`-prefixed field names to drop. See
+ *                  {@link SESSION_IMMUTABLE_FIELDS}.
+ */
 export function omitImmutable(fields: Record<string, any>, immutable: Set<string>): Record<string, any> {
   const result: Record<string, any> = {};
   for (const [key, value] of Object.entries(fields)) {

@@ -1,0 +1,63 @@
+# ==============================================================================
+# Repo-root .gitignore.
+#
+# `code/.gitignore` covers Node/build artefacts under the snap-in source tree.
+# This file covers files that may appear at the repo root (env, IDE, OS).
+# ==============================================================================
+
+# ---- OS junk -----------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ---- Editors / IDEs ----------------------------------------------------------
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.swp
+*.swo
+*.swn
+*~
+
+# ---- Environment / secrets ---------------------------------------------------
+# Never commit real env files; .env.example is fine to track.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ---- Node / TypeScript build output (top-level guards) -----------------------
+node_modules/
+dist/
+build/
+out/
+out-tsc/
+coverage/
+*.tsbuildinfo
+
+# ---- Logs --------------------------------------------------------------------
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ---- DevRev CLI workspace state ---------------------------------------------
+.devrev/
+
+# ---- Snap-in packaged builds -------------------------------------------------
+*.tar.gz
+
+# ---- Test / scratch artefacts ------------------------------------------------
+deps.json
+results.json
+before-run-data.json

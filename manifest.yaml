@@ -165,7 +165,7 @@ event_sources:
            - `users:read` - Get user information
            - `users:read.email` - Access user email addresses
            - `app_mentions:read` - Receive @mentions
-           - `commands` - Required for the `/sda-feedback` slash command
+           - `commands` - Required for the `/sda-agent-feedback` slash command
 
         3. Enable Event Subscriptions:
            - Turn on "Enable Events"
@@ -174,7 +174,7 @@ event_sources:
            - Optionally add: `message.im` for direct messages
 
         4. Slash Commands → Create New Command:
-           - Command: `/sda-feedback`
+           - Command: `/sda-agent-feedback`
            - Paste the same Request URL above
            - Short description: "Share feedback on the SDA Agent"
 

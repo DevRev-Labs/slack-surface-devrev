@@ -6,6 +6,7 @@ import {
 } from '@devrev/typescript-sdk/dist/auto-generated/beta/beta-devrev-sdk';
 
 import { FunctionInput } from '../../types';
+import { logger } from '../../utils/logger';
 import { SESSION_LEAF_TYPE, SESSION_LEAF_TYPE_DESCRIPTION } from '../../utils/session-config';
 import { SchemaFieldSpec, SESSION_FIELD_SPECS } from '../../utils/session-fields';
 
@@ -65,7 +66,7 @@ async function ensureSessionStateSchema(event: FunctionInput): Promise<any> {
 
     try {
       const response = await devrevSdk.customSchemaFragmentsSet(payload);
-      console.log(`[${requestId}] Ensured schema`, {
+      logger.info(`[${requestId}] Ensured schema`, {
         leafType: spec.leaf_type,
         schemaId: response.data?.id || '',
       });
@@ -76,7 +77,7 @@ async function ensureSessionStateSchema(event: FunctionInput): Promise<any> {
       });
     } catch (error: any) {
       hadError = true;
-      console.error(
+      logger.error(
         `[${requestId}] Failed to ensure schema ${spec.leaf_type}:`,
         error?.response?.data || error?.message || error
       );
@@ -104,8 +105,33 @@ async function ensureSessionStateSchema(event: FunctionInput): Promise<any> {
   }
 }
 
+/**
+ * Entry point for the snap-in's activate hook. Each event is processed
+ * independently; an unexpected throw on one event must not reject the whole
+ * batch, so we wrap the per-event call in a defensive try/catch — same shape
+ * as every other handler in the snap-in.
+ */
 export const run = async (events: FunctionInput[]): Promise<any> => {
-  const results = await Promise.all(events.map(async (event) => ensureSessionStateSchema(event)));
+  const results = await Promise.all(
+    events.map(async (event) => {
+      try {
+        return await ensureSessionStateSchema(event);
+      } catch (error: any) {
+        // Activate hooks see uncaught throws as a generic platform crash;
+        // funnel them into the same { status: 'error' } envelope the rest
+        // of the snap-in returns so the platform marks the snap-in errored
+        // (not crashed) and the operator gets a useful reason.
+        const requestId = event?.execution_metadata?.request_id ?? 'unknown';
+        logger.error(`[${requestId}] ensure_session_state_schema crashed`, {
+          message: error?.message || String(error),
+        });
+        return {
+          reason: error?.message || 'Unknown error',
+          status: 'error',
+        };
+      }
+    })
+  );
 
   return results.length === 1 ? results[0] : results;
 };

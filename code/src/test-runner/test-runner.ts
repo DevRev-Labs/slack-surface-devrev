@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import { functionFactory, FunctionFactoryType } from '../function-factory';
+import { logger } from '../utils/logger';
 
 export interface TestRunnerProps {
   functionName: FunctionFactoryType;
@@ -17,8 +18,10 @@ export const testRunner = async ({ functionName, fixturePath }: TestRunnerProps)
   dotenv.config();
 
   if (!functionFactory[functionName]) {
-    console.error(`${functionName} is not found in the functionFactory`);
-    console.error('Add your function to the function-factory.ts file');
+    logger.error('Function not found in functionFactory', {
+      functionName,
+      hint: 'Register the function in src/function-factory.ts',
+    });
     throw new Error('Function is not found in the functionFactory');
   }
 

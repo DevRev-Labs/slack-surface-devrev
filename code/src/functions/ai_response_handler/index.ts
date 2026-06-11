@@ -8,9 +8,11 @@
  * (client_metadata.session_id) or by that conversation DON.
  */
 
+import { RENDER_CONFIG } from '../../config/defaults';
 import { FunctionInput } from '../../types';
 import { ConversationReference } from '../../utils/conversation-store';
 import { parseAgentResponseToBlocks } from '../../utils/format-text';
+import { logger } from '../../utils/logger';
 import { readSessionTimingConfig } from '../../utils/session-config';
 import {
   getSessionByConversationId,
@@ -53,22 +55,22 @@ async function resolveSessionFromResponse(
     try {
       const byId = await getSessionById(storeConfig, value);
       if (byId) {
-        console.log(`[${requestId}] [STORE] Session resolved by id via ${source}: ${byId.sessionId}`);
+        logger.info(`[${requestId}] [STORE] Session resolved by id via ${source}: ${byId.sessionId}`);
         return { record: byId, ref: recordToConversationReference(byId) };
       }
     } catch (err: any) {
-      console.warn(`[${requestId}] [STORE] getSessionById(${source}) failed: ${err?.message || err}`);
+      logger.warn(`[${requestId}] [STORE] getSessionById(${source}) failed: ${err?.message || err}`);
     }
 
     if (typeof value === 'string' && value.includes(':conversation/')) {
       try {
         const byConv = await getSessionByConversationId(storeConfig, value);
         if (byConv) {
-          console.log(`[${requestId}] [STORE] Session resolved by conversation DON via ${source}: ${byConv.sessionId}`);
+          logger.info(`[${requestId}] [STORE] Session resolved by conversation DON via ${source}: ${byConv.sessionId}`);
           return { record: byConv, ref: recordToConversationReference(byConv) };
         }
       } catch (err: any) {
-        console.warn(`[${requestId}] [STORE] getSessionByConversationId(${source}) failed: ${err?.message || err}`);
+        logger.warn(`[${requestId}] [STORE] getSessionByConversationId(${source}) failed: ${err?.message || err}`);
       }
     }
   }
@@ -83,7 +85,7 @@ async function resolveSessionFromResponse(
       threadTs: meta.threadTs || meta.thread_ts || undefined,
       timestamp: meta.timestamp ?? Date.now(),
     };
-    console.log(`[${requestId}] [STORE] Falling back to client_metadata.conversation_reference (no SessionRecord)`);
+    logger.info(`[${requestId}] [STORE] Falling back to client_metadata.conversation_reference (no SessionRecord)`);
     return { record: null as unknown as SessionRecord, ref };
   }
 
@@ -101,7 +103,7 @@ async function safePatch(
   try {
     return await patchSession(storeConfig, record, patch);
   } catch (err: any) {
-    console.warn(`[${requestId}] [STORE] patchSession failed (${context}): ${err?.message || err}`);
+    logger.warn(`[${requestId}] [STORE] patchSession failed (${context}): ${err?.message || err}`);
     return record;
   }
 }
@@ -125,7 +127,7 @@ async function mirrorAgentResponseToTimeline(
     externalRef: `slack-agent-${record.sessionId}-${record.messageCount}`,
     token: storeConfig.serviceAccountToken,
   }).catch((err: any) => {
-    console.warn(`[${requestId}] [TIMELINE] mirror agent response failed: ${err?.message || err}`);
+    logger.warn(`[${requestId}] [TIMELINE] mirror agent response failed: ${err?.message || err}`);
   });
 }
 
@@ -142,14 +144,14 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
     timing: readSessionTimingConfig(input_data.global_values),
   };
 
-  console.log(`[${requestId}] [AI_RESP] Raw payload keys: ${Object.keys(payload).join(', ')}`);
+  logger.info(`[${requestId}] [AI_RESP] Raw payload keys: ${Object.keys(payload).join(', ')}`);
 
   const clientMetadata = payload.client_metadata || payload.ai_agent_response?.client_metadata || {};
-  console.log(`[${requestId}] [AI_RESP] client_metadata keys: ${Object.keys(clientMetadata).join(', ')}`);
+  logger.info(`[${requestId}] [AI_RESP] client_metadata keys: ${Object.keys(clientMetadata).join(', ')}`);
 
   const resolved = await resolveSessionFromResponse(storeConfig, payload, requestId);
   if (!resolved) {
-    console.error(
+    logger.error(
       `[${requestId}] [STORE] FATAL: No session reference found. client_metadata: ${JSON.stringify(clientMetadata)}`
     );
     return { reason: 'Conversation reference not found', status: 'error' };
@@ -159,7 +161,7 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
   const conversationRef: ConversationReference = resolved.ref;
   const sessionId = sessionRecord?.sessionId || clientMetadata.session_id || payload.session_object || 'unknown';
 
-  console.log(
+  logger.info(
     `[${requestId}] [AI_RESP] Session resolved — sessionId: ${sessionId}, channel: ${conversationRef.channel}, user: ${
       conversationRef.userId
     }, tempMsgTs: ${conversationRef.tempMessageTs ?? 'none'}`
@@ -168,18 +170,18 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
   const slackBotToken = clientMetadata.slack_bot_token || input_data.keyrings['slack_bot_token'];
 
   if (!slackBotToken) {
-    console.error(`[${requestId}] Slack Bot Token not configured`);
+    logger.error(`[${requestId}] Slack Bot Token not configured`);
     return { reason: 'Slack Bot Token not configured', status: 'error' };
   }
 
   const agentResponseType = payload.ai_agent_response?.agent_response || payload.agent_response;
-  console.log(`[${requestId}] [AI_RESP] agent_response type: ${agentResponseType ?? 'undefined'}`);
-  console.log(
+  logger.info(`[${requestId}] [AI_RESP] agent_response type: ${agentResponseType ?? 'undefined'}`);
+  logger.info(
     `[${requestId}] [AI_RESP] full ai_agent_response keys: ${Object.keys(payload.ai_agent_response || {}).join(', ')}`
   );
 
   if (agentResponseType === 'suggestions' || payload.ai_agent_response?.suggestions) {
-    console.log(`[${requestId}] [AI_RESP] Ignoring suggestions event`);
+    logger.info(`[${requestId}] [AI_RESP] Ignoring suggestions event`);
     return { reason: 'Suggestions event', status: 'ignored' };
   }
 
@@ -194,7 +196,7 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
     !!sessionRecord && sessionRecord.messageCount > 0 && sessionRecord.lastDeliveredTurn >= sessionRecord.messageCount;
 
   if (turnAlreadyDelivered && agentResponseType !== 'error' && sessionRecord) {
-    console.log(
+    logger.info(
       `[${requestId}] [AI_RESP] dropping duplicate event (type=${agentResponseType ?? 'final-message'}) for turn=${
         sessionRecord.messageCount
       } (already delivered)`
@@ -209,7 +211,7 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
   // don't touch the placeholder at all.
   if (agentResponseType === 'progress') {
     const progress = payload.ai_agent_response?.progress || payload.progress;
-    console.log(
+    logger.info(
       `[${requestId}] [AI_RESP] progress state: ${progress?.progress_state}, keys: ${Object.keys(progress || {}).join(
         ', '
       )}`
@@ -217,7 +219,7 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
     if (progress) {
       const thought = extractThought(progress);
       if (!thought) {
-        console.log(`[${requestId}] [AI_RESP] Progress event has no thought, skipping`);
+        logger.info(`[${requestId}] [AI_RESP] Progress event has no thought, skipping`);
         return { message: 'Progress event without thought ignored', status: 'ignored' };
       }
       // Keep the hourglass that slack_handler used for the initial
@@ -237,12 +239,12 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
           if (fresh?.tempMessageTs) {
             conversationRef.tempMessageTs = fresh.tempMessageTs;
             sessionRecord = fresh;
-            console.log(
+            logger.info(
               `[${requestId}] [AI_RESP] progress: picked up tempMessageTs=${fresh.tempMessageTs} from fresh session read`
             );
           }
         } catch (refetchErr: any) {
-          console.warn(`[${requestId}] [AI_RESP] progress re-fetch failed: ${refetchErr?.message || refetchErr}`);
+          logger.warn(`[${requestId}] [AI_RESP] progress re-fetch failed: ${refetchErr?.message || refetchErr}`);
         }
       }
 
@@ -252,7 +254,7 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
             await updateMessage(conversationRef.channel, conversationRef.tempMessageTs, progressMessage, slackBotToken);
           } catch (updateErr: any) {
             // Stale tempMessageTs (e.g. message_not_found) — send a new one
-            console.warn(
+            logger.warn(
               `[${requestId}] [AI_RESP] updateMessage failed (${updateErr.message}), sending new progress message`
             );
             const ts = await sendMessage(
@@ -288,7 +290,7 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
         }
         return { message: 'Progress update sent to Slack', status: 'success' };
       } catch (error: any) {
-        console.error(`[${requestId}] Failed to send progress update:`, error.message);
+        logger.error(`[${requestId}] Failed to send progress update:`, error.message);
         return { reason: 'Failed to send progress', status: 'error' };
       }
     }
@@ -313,7 +315,7 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
       await sendMessage(conversationRef.channel, `❌ Error: ${errorMsg}`, slackBotToken, conversationRef.threadTs);
       return { message: 'AI error sent to Slack', status: 'error' };
     } catch (error: any) {
-      console.error(`[${requestId}] Failed to send error message:`, error.message);
+      logger.error(`[${requestId}] Failed to send error message:`, error.message);
       return { reason: 'Failed to send error message', status: 'error' };
     }
   }
@@ -322,17 +324,17 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
   // with the agent reply (chat.update). Re-read the session immediately
   // before deciding so we don't race slack_handler's tempMessageTs write
   // — that race was producing one orphaned placeholder + a separate reply.
-  console.log(`[${requestId}] [AI_RESP] Extracting final response text from payload`);
-  console.log(
+  logger.info(`[${requestId}] [AI_RESP] Extracting final response text from payload`);
+  logger.info(
     `[${requestId}] [AI_RESP] full payload: ${JSON.stringify(payload.ai_agent_response ?? null).substring(0, 500)}`
   );
   const responseText = extractResponseText(payload);
 
   if (!responseText) {
-    console.warn(`[${requestId}] [AI_RESP] No response text found. Payload: ${JSON.stringify(payload)}`);
+    logger.warn(`[${requestId}] [AI_RESP] No response text found. Payload: ${JSON.stringify(payload)}`);
     return { reason: 'No response text from AI Agent', status: 'warning' };
   }
-  console.log(`[${requestId}] [AI_RESP] Response text extracted, length: ${responseText.length}`);
+  logger.info(`[${requestId}] [AI_RESP] Response text extracted, length: ${responseText.length}`);
 
   // Re-read the latest session row to pick up tempMessageTs that was
   // written by slack_handler after the original conversationRef snapshot
@@ -344,20 +346,20 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
         sessionRecord = fresh;
         if (fresh.tempMessageTs && !conversationRef.tempMessageTs) {
           conversationRef.tempMessageTs = fresh.tempMessageTs;
-          console.log(
+          logger.info(
             `[${requestId}] [AI_RESP] picked up tempMessageTs=${fresh.tempMessageTs} from fresh session read`
           );
         }
       }
     } catch (refetchErr: any) {
-      console.warn(
+      logger.warn(
         `[${requestId}] [AI_RESP] re-fetch of session before final send failed: ${refetchErr?.message || refetchErr}`
       );
     }
   }
 
   const threadTs = conversationRef.threadTs || conversationRef.messageTs;
-  console.log(
+  logger.info(
     `[${requestId}] [AI_RESP] Sending final response, channel: ${conversationRef.channel}, threadTs: ${
       threadTs ?? 'none'
     }, tempMsgTs: ${conversationRef.tempMessageTs ?? 'none'}`
@@ -366,7 +368,7 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
   try {
     const { blocks, text: fallbackText } = parseAgentResponseToBlocks(responseText);
     const blocksForSlack = blocks.length > 0 ? blocks : undefined;
-    console.log(
+    logger.info(
       `[${requestId}] [AI_RESP] Response from agent: "${responseText.substring(0, 200)}${
         responseText.length > 200 ? '...' : ''
       }"${blocksForSlack ? ` (${blocksForSlack.length} blocks)` : ''}`
@@ -383,12 +385,12 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
           slackBotToken,
           blocksForSlack
         );
-        console.log(`[${requestId}] [AI_RESP] Final response replaced placeholder ts=${conversationRef.tempMessageTs}`);
+        logger.info(`[${requestId}] [AI_RESP] Final response replaced placeholder ts=${conversationRef.tempMessageTs}`);
       } catch (updateErr: any) {
         // Placeholder is gone or stale — fall through to sendMessage so the
         // user still sees the reply. Try a best-effort cleanup of the
         // orphan first.
-        console.warn(
+        logger.warn(
           `[${requestId}] [AI_RESP] chat.update failed (${updateErr?.message || updateErr}); sending fresh message`
         );
         await deleteMessage(conversationRef.channel, conversationRef.tempMessageTs, slackBotToken).catch(
@@ -408,7 +410,7 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
       await sendMessage(conversationRef.channel, fallbackText, slackBotToken, threadTs, blocksForSlack);
     }
 
-    console.log(
+    logger.info(
       `[${requestId}] [AI_RESP] Final response sent successfully to channel: ${conversationRef.channel}, thread: ${
         threadTs ?? 'none'
       }`
@@ -435,7 +437,7 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
       status: 'success',
     };
   } catch (error: any) {
-    console.error(`[${requestId}] [AI_RESP] Failed to send response:`, error.message);
+    logger.error(`[${requestId}] [AI_RESP] Failed to send response:`, error.message);
     return {
       details: error.message,
       reason: 'Failed to send response to Slack',
@@ -445,7 +447,8 @@ async function handleAIResponse(event: FunctionInput): Promise<any> {
 }
 
 // Max characters kept per individual thought before truncation.
-const THOUGHT_MAX_LENGTH = 250;
+// Tunable via the AI_THOUGHT_MAX_LENGTH env var; see config/defaults.ts.
+const THOUGHT_MAX_LENGTH = RENDER_CONFIG.thoughtMaxLength;
 
 /**
  * Pull the AI Agent's reasoning ("thought") out of a progress object.
@@ -516,7 +519,7 @@ export const run = async (events: FunctionInput[]): Promise<any> => {
       try {
         return await handleAIResponse(event);
       } catch (error: any) {
-        console.error(`[${event?.execution_metadata?.request_id ?? 'unknown'}] Error processing AI response:`, error);
+        logger.error(`[${event?.execution_metadata?.request_id ?? 'unknown'}] Error processing AI response:`, error);
         return {
           reason: error.message || 'Unknown error',
           status: 'error',

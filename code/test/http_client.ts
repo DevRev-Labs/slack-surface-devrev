@@ -36,6 +36,10 @@ export class HTTPClient {
       },
     };
 
+    // axios's default export is the callable client; `create` is a method on
+    // that instance, not an in-scope named export. The lint rule confuses the
+    // two — disable it here only.
+    // eslint-disable-next-line import/no-named-as-default-member
     this.instance = axios.create({
       ...axiosConfig,
     });

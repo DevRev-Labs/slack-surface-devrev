@@ -20,7 +20,11 @@
  */
 import { createHmac, timingSafeEqual } from 'crypto';
 
-const SLACK_TIMESTAMP_SKEW_SECONDS = 5 * 60;
+import { SLACK_SIGNATURE_CONFIG } from '../config/defaults';
+
+// Configurable replay-window via SLACK_TIMESTAMP_SKEW_SECONDS env var; the
+// 5-minute default matches Slack's published guidance.
+const SLACK_TIMESTAMP_SKEW_SECONDS = SLACK_SIGNATURE_CONFIG.timestampSkewSeconds;
 const SLACK_SIGNATURE_REGEX = /^v0=[a-f0-9]{64}$/;
 
 export interface SlackSignatureValidationResult {

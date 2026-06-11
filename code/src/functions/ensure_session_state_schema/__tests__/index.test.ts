@@ -131,4 +131,27 @@ describe('ensure_session_state_schema', () => {
     expect(result).toEqual(expect.objectContaining({ status: 'ignored' }));
     expect(mockCustomSchemaFragmentsSet).not.toHaveBeenCalled();
   });
+
+  test('returns a structured error envelope when an event throws unexpectedly', async () => {
+    // The platform sees an uncaught throw as a generic crash; the run wrapper
+    // must funnel it into { status: 'error', reason } instead.
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    mockSetupBeta = jest.fn(() => {
+      throw new Error('SDK setup blew up');
+    });
+
+    const result = await run([activateEvent]);
+
+    expect(result).toEqual(expect.objectContaining({ reason: expect.stringContaining('SDK setup'), status: 'error' }));
+    errSpy.mockRestore();
+  });
+
+  test('survives a malformed event with no execution_metadata', async () => {
+    // Defensive coverage: even if the platform feeds us garbage we should
+    // return a clean envelope and not crash the whole batch.
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const result = await run([{ payload: {} } as unknown as FunctionInput]);
+    expect(result).toEqual(expect.objectContaining({ status: 'error' }));
+    errSpy.mockRestore();
+  });
 });

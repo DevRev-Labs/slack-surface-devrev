@@ -13,6 +13,7 @@ deploying any code into production environments.
 */
 
 import yargs from 'yargs';
+// eslint-disable-next-line import/no-unresolved
 import { hideBin } from 'yargs/helpers';
 
 import { startServer } from './runner';
