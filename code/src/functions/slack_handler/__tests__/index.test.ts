@@ -297,13 +297,14 @@ describe('slack_handler', () => {
     const result = await run([event]);
 
     expect(result.status).toBe('ignored');
-    expect(result.reason).toBe('Channel message outside of an active bot session');
+    expect(result.reason).toBe('Channel message without mention');
+    expect(mockedSessionStore.getActiveSession).not.toHaveBeenCalled();
     expect(mockedSessionStore.createSession).not.toHaveBeenCalled();
     expect(mockedSessionStore.touchSession).not.toHaveBeenCalled();
     expect(mockExecuteAsync).not.toHaveBeenCalled();
   });
 
-  test('continues an active thread session when user replies without re-mentioning the bot', async () => {
+  test('ignores thread replies without a bot mention even when an active session exists', async () => {
     mockedSessionStore.getActiveSession.mockResolvedValue(makeRecord({ messageCount: 3, sessionId: 'uuid-active' }));
     const event = {
       ...mockEvent,
@@ -321,10 +322,11 @@ describe('slack_handler', () => {
 
     const result = await run([event]);
 
-    expect(result.status).toBe('success');
+    expect(result.status).toBe('ignored');
+    expect(result.reason).toBe('Channel message without mention');
+    expect(mockedSessionStore.getActiveSession).not.toHaveBeenCalled();
     expect(mockedSessionStore.createSession).not.toHaveBeenCalled();
-    expect(mockExecuteAsync).toHaveBeenCalled();
-    expect(result.session_id).toBe('uuid-active');
+    expect(mockExecuteAsync).not.toHaveBeenCalled();
   });
 
   test('top-level @mention in a channel creates a new session with idle and hard TTLs', async () => {

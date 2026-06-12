@@ -58,10 +58,6 @@ function readSlackHeader(headers: Record<string, any> | undefined, name: string)
  *
  * - reset intent → rotate existing (or create) with reason `user_reset`.
  * - normal flow → reuse active, rotate on idle/absolute expiry, else create.
- *
- * `requireExistingSession=true` (used for unmentioned thread replies) skips
- * session creation when no active row is found — the caller treats that as
- * "ignore this message".
  */
 async function resolveSession(
   storeConfig: StoreConfig,
@@ -69,9 +65,8 @@ async function resolveSession(
   identity: SessionIdentity,
   userOverrides: SessionUserOverrides,
   intent: 'message' | 'reset',
-  requestId: string,
-  requireExistingSession = false
-): Promise<SessionRecord | null> {
+  requestId: string
+): Promise<SessionRecord> {
   const existing = await getActiveSession(storeConfig, identity.conversationKey);
 
   if (intent === 'reset') {
@@ -86,10 +81,6 @@ async function resolveSession(
   }
 
   if (!existing) {
-    if (requireExistingSession) {
-      logger.info(`[${requestId}] [session] no active session for thread reply — ignoring`);
-      return null;
-    }
     const fresh = await createSession(storeConfig, { identity, ...userOverrides }, timing);
     logger.info(`[${requestId}] [session] created ${fresh.sessionId} gen=${fresh.generation}`);
     return fresh;
@@ -97,10 +88,6 @@ async function resolveSession(
 
   const expiredReason = isSessionExpired(existing);
   if (expiredReason) {
-    if (requireExistingSession) {
-      logger.info(`[${requestId}] [session] active session expired (${expiredReason}) for thread reply — ignoring`);
-      return null;
-    }
     const rotated = await rotateSession(storeConfig, existing, expiredReason, identity, timing, userOverrides);
     logger.info(
       `[${requestId}] [session] rotated reason=${expiredReason} old=${existing.sessionId} new=${rotated.sessionId} gen=${rotated.generation}`
@@ -168,14 +155,14 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
     return { reason: 'Bot message', status: 'ignored' };
   }
 
-  // In channels and group DMs, the bot only kicks off a fresh session when it
-  // is explicitly @-mentioned (`app_mention`). Plain `message` events are
-  // processed only if they are continuing an *existing* session for this
-  // (channel, thread, user) — i.e. follow-up replies inside a thread the bot
-  // is already part of. A top-level channel message without a mention starts
-  // no session, so it falls through and is ignored downstream. DMs
-  // (`channel_type === 'im'`) treat every message as in-scope.
-  const isChannelMessageWithoutMention = slackEvent.type === 'message' && slackEvent.channel_type !== 'im';
+  // In channels and group DMs, the bot ONLY responds when it is explicitly
+  // @-mentioned (`app_mention`) — top-level posts AND thread replies alike.
+  // Plain `message` events without a mention are ignored even if a prior
+  // session exists for the thread. DMs (`channel_type === 'im'`) still treat
+  // every message as in-scope.
+  if (slackEvent.type === 'message' && slackEvent.channel_type !== 'im') {
+    return { reason: 'Channel message without mention', status: 'ignored' };
+  }
 
   const messageText = slackEvent.text?.trim();
   if (!messageText) {
@@ -345,7 +332,7 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
     userEmail: resolvedEmail,
   };
 
-  let sessionRecord: SessionRecord | null;
+  let sessionRecord: SessionRecord;
   try {
     sessionRecord = await resolveSession(
       storeConfig,
@@ -353,16 +340,11 @@ async function handleSlackMessage(event: FunctionInput): Promise<any> {
       identity,
       userOverrides,
       isResetIntent ? 'reset' : 'message',
-      requestId,
-      isChannelMessageWithoutMention
+      requestId
     );
   } catch (resolveErr: any) {
     logger.error(`[${requestId}] [session] resolveSession failed: ${resolveErr?.message || resolveErr}`);
     return { details: resolveErr?.message, reason: 'Failed to resolve session', status: 'error' };
-  }
-
-  if (!sessionRecord) {
-    return { reason: 'Channel message outside of an active bot session', status: 'ignored' };
   }
 
   if (isResetIntent) {
