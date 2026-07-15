@@ -57,7 +57,7 @@
     "@babel/runtime": "7.27.1",
     "@devrev/typescript-sdk": "1.1.77",
     "axios": "^1.13.4",
-    "protobufjs": "^7.6.2"
+    "protobufjs": "7.6.5"
   },
   "overrides": {
     "form-data": "4.0.6"
