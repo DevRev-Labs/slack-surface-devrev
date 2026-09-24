@@ -54,7 +54,7 @@
     "yargs": "18.0.0"
   },
   "dependencies": {
-    "@babel/runtime": "7.27.1",
+    "@babel/runtime": "7.29.7",
     "@devrev/typescript-sdk": "1.1.77",
     "axios": "1.18.0",
     "protobufjs": "7.6.5"
