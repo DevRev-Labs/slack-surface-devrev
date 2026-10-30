@@ -58,7 +58,7 @@
     "@devrev/typescript-sdk": "1.1.77",
     "axios": "1.20.0",
     "follow-redirects": "1.16.2",
-    "protobufjs": "7.6.5"
+    "protobufjs": "7.6.6"
   },
   "overrides": {
     "form-data": "4.0.6"
